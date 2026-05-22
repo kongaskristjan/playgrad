@@ -1,9 +1,16 @@
 # playgrad
 
-A playground for hand-rolled deep learning models in PyTorch.
+A visualization library for deep learning experiments (work in progress) and a
+playground for hand-rolled PyTorch models.
 
-The first project is a small CIFAR-style residual convolutional network trained
-on CIFAR10.
+## Layout
+
+- `playgrad/` — the visualization library. Intended to be `pip`-installable;
+  contains no training logic. Currently a stub.
+- `examples/` — runnable Python examples, each in its own subdirectory and
+  fully containing its training logic.
+- `tests/` — tests for both the `playgrad` library and the examples; the
+  layout mirrors the source tree.
 
 ## Setup
 
@@ -11,10 +18,13 @@ on CIFAR10.
 uv sync
 ```
 
-## Train CIFAR10
+## CIFAR10 example
+
+The first example is a small CIFAR-style residual convolutional network
+trained on CIFAR10 (`examples/cifar10/`).
 
 ```bash
-uv run python scripts/train_cifar10.py --epochs 50
+uv run python -m examples.cifar10.main --epochs 50
 ```
 
 Useful flags:
@@ -30,9 +40,9 @@ The script uses SGD with Nesterov momentum, cosine LR annealing, and the
 standard CIFAR10 augmentations (random crop with 4-pixel padding + horizontal
 flip + normalisation).
 
-## Architecture
+### Architecture
 
-`lib/resnet.py` defines a CIFAR ResNet:
+`examples/cifar10/resnet.py` defines a CIFAR ResNet:
 
 - 3x3 stem conv into 16 channels.
 - Three stages of `BasicBlock`s at widths `(16, 32, 64)` with `stride=2`

@@ -456,18 +456,24 @@ wheels = [
 [[package]]
 name = "playgrad"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
-    { name = "pytest" },
     { name = "torch" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
     { name = "torchvision" },
     { name = "ty" },
 ]
 
 [package.metadata]
-requires-dist = [
+requires-dist = [{ name = "torch", specifier = ">=2.12.0" }]
+
+[package.metadata.requires-dev]
+dev = [
     { name = "pytest", specifier = ">=9.0.3" },
-    { name = "torch", specifier = ">=2.12.0" },
     { name = "torchvision", specifier = ">=0.27.0" },
     { name = "ty", specifier = ">=0.0.38" },
 ]

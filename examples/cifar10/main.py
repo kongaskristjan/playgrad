@@ -3,20 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from pathlib import Path
 
 import torch
 from torch import nn
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from lib.data import build_dataloaders
-from lib.resnet import ResNetCIFAR
-from lib.train import evaluate, train_one_epoch
+from examples.cifar10.data import build_dataloaders
+from examples.cifar10.resnet import ResNetCIFAR
+from examples.cifar10.train import evaluate, train_one_epoch
 
 
 def parse_args() -> argparse.Namespace:

@@ -6,8 +6,8 @@ import pytest
 import torch
 from torch import nn
 
-from lib.resnet import BasicBlock, ResNetCIFAR, resnet20
-from lib.train import evaluate, train_one_epoch
+from examples.cifar10.resnet import BasicBlock, ResNetCIFAR, resnet20
+from examples.cifar10.train import evaluate, train_one_epoch
 
 
 @pytest.mark.parametrize(

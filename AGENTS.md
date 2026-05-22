@@ -6,9 +6,9 @@
 - Package manager: `uv`
 - Dependencies: `uv sync`, `uv add <package>` etc.
 - Directory structure:
-  - `lib/` - Library files
-  - `scripts/` - Runnable Python files (avoid .sh scripts)
-  - `tests/` - Tests
+  - 'playgrad/' - Playgrad visualization library (no training)
+  - `examples/` - Runnable Python examples (fully contains training logic, each example in a separate subdirectory)
+  - `tests/` - Tests for both examples and the playgrad library
   - `README.md` - Usage and high level technical documentation
 
 ## Code quality
