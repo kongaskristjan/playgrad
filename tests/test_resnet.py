@@ -59,7 +59,8 @@ def test_training_step_reduces_loss() -> None:
     assert final < initial
 
 
-def test_train_and_eval_loops_run() -> None:
+@pytest.mark.parametrize("amp_dtype", [None, torch.bfloat16])
+def test_train_and_eval_loops_run(amp_dtype: torch.dtype | None) -> None:
     torch.manual_seed(0)
     model = ResNetCIFAR(num_classes=10, blocks_per_stage=1)
     device = torch.device("cpu")
@@ -71,8 +72,8 @@ def test_train_and_eval_loops_run() -> None:
     dataset = torch.utils.data.TensorDataset(inputs, targets)
     loader = torch.utils.data.DataLoader(dataset, batch_size=4)
 
-    train_stats = train_one_epoch(model, loader, optimizer, criterion, device)
-    eval_stats = evaluate(model, loader, criterion, device)
+    train_stats = train_one_epoch(model, loader, optimizer, criterion, device, amp_dtype=amp_dtype)
+    eval_stats = evaluate(model, loader, criterion, device, amp_dtype=amp_dtype)
 
     assert 0.0 <= train_stats.accuracy <= 1.0
     assert 0.0 <= eval_stats.accuracy <= 1.0

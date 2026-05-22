@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import torch
@@ -20,12 +22,22 @@ def _accuracy(logits: Tensor, targets: Tensor) -> float:
     return (preds == targets).float().mean().item()
 
 
+@contextlib.contextmanager
+def _autocast(device: torch.device, amp_dtype: torch.dtype | None) -> Iterator[None]:
+    if amp_dtype is None:
+        yield
+        return
+    with torch.autocast(device_type=device.type, dtype=amp_dtype):
+        yield
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
+    amp_dtype: torch.dtype | None = None,
 ) -> EpochStats:
     model.train()
     total_loss = 0.0
@@ -36,8 +48,9 @@ def train_one_epoch(
         targets = targets.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = model(inputs)
-        loss = criterion(logits, targets)
+        with _autocast(device, amp_dtype):
+            logits = model(inputs)
+            loss = criterion(logits, targets)
         loss.backward()
         optimizer.step()
 
@@ -54,6 +67,7 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    amp_dtype: torch.dtype | None = None,
 ) -> EpochStats:
     model.eval()
     total_loss = 0.0
@@ -63,8 +77,9 @@ def evaluate(
         inputs = inputs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        logits = model(inputs)
-        loss = criterion(logits, targets)
+        with _autocast(device, amp_dtype):
+            logits = model(inputs)
+            loss = criterion(logits, targets)
 
         total_loss += loss.item() * targets.size(0)
         total_correct += int((logits.argmax(dim=1) == targets).sum().item())

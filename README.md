@@ -14,14 +14,16 @@ uv sync
 ## Train CIFAR10
 
 ```bash
-uv run python scripts/train_cifar10.py --epochs 50 --batch-size 128
+uv run python scripts/train_cifar10.py --epochs 50
 ```
 
 Useful flags:
 
+- `--batch-size` (default `256`).
 - `--blocks-per-stage` — depth knob; total depth is `6n + 2` (default `3` gives ResNet-20).
 - `--lr`, `--momentum`, `--weight-decay` — SGD hyperparameters.
 - `--device` — `cpu`, `cuda`, or `mps`. Auto-detected when omitted.
+- `--bf16` — wrap forward/loss in `torch.autocast` with `bfloat16` (no `GradScaler` needed).
 - `--checkpoint path/to/file.pt` — save best-by-test-accuracy weights.
 
 The script uses SGD with Nesterov momentum, cosine LR annealing, and the
