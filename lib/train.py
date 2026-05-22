@@ -1,0 +1,76 @@
+"""Training loop primitives for the CIFAR ResNet."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+from torch import Tensor, nn
+from torch.utils.data import DataLoader
+
+
+@dataclass
+class EpochStats:
+    loss: float
+    accuracy: float
+
+
+def _accuracy(logits: Tensor, targets: Tensor) -> float:
+    preds = logits.argmax(dim=1)
+    return (preds == targets).float().mean().item()
+
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: torch.device,
+) -> EpochStats:
+    model.train()
+    total_loss = 0.0
+    total_acc = 0.0
+    n_batches = 0
+    for inputs, targets in loader:
+        inputs = inputs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(inputs)
+        loss = criterion(logits, targets)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        total_acc += _accuracy(logits, targets)
+        n_batches += 1
+
+    return EpochStats(loss=total_loss / n_batches, accuracy=total_acc / n_batches)
+
+
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> EpochStats:
+    model.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    for inputs, targets in loader:
+        inputs = inputs.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+
+        logits = model(inputs)
+        loss = criterion(logits, targets)
+
+        total_loss += loss.item() * targets.size(0)
+        total_correct += int((logits.argmax(dim=1) == targets).sum().item())
+        total_samples += targets.size(0)
+
+    return EpochStats(
+        loss=total_loss / total_samples,
+        accuracy=total_correct / total_samples,
+    )
