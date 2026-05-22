@@ -32,6 +32,7 @@
 
 - Every user requested change should be accompanied by a commit. No need to ask for permission.
 - Most commits should include corresponding test additions or changes. High level changes should incorporate documentation changes.
-- Before commiting: `uv run pytest && uv run ty check`
+- Before committing: `uv run pytest && uv run ty check`
+- Before committing: run the code
 - `README.md` should be kept up to date
 
