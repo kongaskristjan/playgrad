@@ -48,9 +48,18 @@ class Mode(StrEnum):
 
 @dataclass(frozen=True)
 class BatchSnapshot:
+    """Immutable per-batch view, fully resident on CPU.
+
+    All four tensor dicts are independent CPU clones taken at snapshot time,
+    so the snapshot survives subsequent batches freeing the live tensors and
+    can be safely read from any thread.
+    """
+
     position: BatchPosition
     activations: dict[str, Tensor]
-    gradients: dict[str, Tensor]
+    activation_gradients: dict[str, Tensor]
+    weights: dict[str, Tensor]
+    weight_gradients: dict[str, Tensor]
 
 
 class Session:
@@ -181,21 +190,39 @@ class Session:
 
     def _make_hook(self, name: str):
         def hook(_module: nn.Module, _inputs: object, output: object) -> None:
-            if isinstance(output, Tensor):
-                self._activations[name] = output
+            if not isinstance(output, Tensor):
+                return
+            if output.requires_grad:
+                output.retain_grad()
+            self._activations[name] = output
 
         return hook
 
+    @staticmethod
+    def _cpu_clone(t: Tensor) -> Tensor:
+        return t.detach().to("cpu", copy=True)
+
     def _publish_snapshot(self, pos: BatchPosition) -> None:
-        gradients = {
-            name: param.grad
-            for name, param in self.model.named_parameters()
-            if param.grad is not None
+        activations = {n: self._cpu_clone(a) for n, a in self._activations.items()}
+        activation_gradients = {
+            n: self._cpu_clone(a.grad)
+            for n, a in self._activations.items()
+            if a.grad is not None
+        }
+        weights = {
+            n: self._cpu_clone(p) for n, p in self.model.named_parameters()
+        }
+        weight_gradients = {
+            n: self._cpu_clone(p.grad)
+            for n, p in self.model.named_parameters()
+            if p.grad is not None
         }
         self._snapshot = BatchSnapshot(
             position=pos,
-            activations=dict(self._activations),
-            gradients=gradients,
+            activations=activations,
+            activation_gradients=activation_gradients,
+            weights=weights,
+            weight_gradients=weight_gradients,
         )
 
     def _wait_for_proceed(self) -> None:

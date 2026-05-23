@@ -165,7 +165,7 @@ def test_until_epoch_change_captures_only_epoch_end() -> None:
     assert captured_positions == [("val", 0, 1)]
 
 
-def test_snapshot_contains_activations_and_gradients() -> None:
+def test_snapshot_contains_all_four_tensor_categories() -> None:
     session, model = _make_session(epochs=1, phases={"train": 1})
 
     def loop() -> None:
@@ -177,11 +177,48 @@ def test_snapshot_contains_activations_and_gradients() -> None:
     assert session.wait_until_paused(timeout=5)
     snap = session.snapshot
     assert snap is not None
-    assert {"fc1", "fc2"} <= set(snap.activations)
-    assert {"fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"} <= set(snap.gradients)
-    expected_shapes = dict(model.named_parameters())
-    for name, grad in snap.gradients.items():
-        assert grad.shape == expected_shapes[name].shape
+
+    module_names = {"fc1", "fc2"}
+    param_names = {"fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"}
+    assert module_names <= set(snap.activations)
+    assert module_names <= set(snap.activation_gradients)
+    assert param_names <= set(snap.weights)
+    assert param_names <= set(snap.weight_gradients)
+
+    expected_param_shapes = {n: p.shape for n, p in model.named_parameters()}
+    for name in param_names:
+        assert snap.weights[name].shape == expected_param_shapes[name]
+        assert snap.weight_gradients[name].shape == expected_param_shapes[name]
+
+    session.detach()
+    thread.join(timeout=5)
+
+
+def test_snapshot_tensors_are_cpu_and_independent() -> None:
+    session, model = _make_session(epochs=1, phases={"train": 1})
+
+    def loop() -> None:
+        with session.batch(phase="train", epoch=0):
+            _train_step(model)
+
+    thread = _run_in_thread(loop)
+    assert session.wait_until_paused(timeout=5)
+    snap = session.snapshot
+    assert snap is not None
+
+    all_tensors = {
+        **snap.activations,
+        **snap.activation_gradients,
+        **snap.weights,
+        **snap.weight_gradients,
+    }
+    for name, t in all_tensors.items():
+        assert t.device.type == "cpu", name
+        assert not t.requires_grad, name
+
+    live_weight = dict(model.named_parameters())["fc1.weight"]
+    snap_weight = snap.weights["fc1.weight"]
+    assert snap_weight.data_ptr() != live_weight.data_ptr()
 
     session.detach()
     thread.join(timeout=5)

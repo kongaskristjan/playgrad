@@ -68,35 +68,45 @@ hooks?" and "pause after this batch?". Capture and pause are intentionally
 the same predicate — there is no implicit pause that the user did not ask
 for, and there is no orphan capture without a pause to consume it.
 
-## Hook lifecycle and gradient pickup
+## Hook lifecycle, gradient pickup, snapshot copy
 
 When `_should_capture` returns True, `__enter__` calls `_install_hooks()`,
 which registers a forward hook on every submodule (skipping the top-level
-model). The hook stores `output` in `Session._activations` as a *reference*
-— no copy, no device transfer, no statistics. The activation tensors live
-on the same device as the model.
+model). The hook stores `output` in `Session._activations` as a live
+reference, *and* calls `output.retain_grad()` on it (when `requires_grad`)
+so that PyTorch will populate `output.grad` after `loss.backward()`. No
+backward hook is needed.
 
 At `__exit__`:
 
 1. `_remove_hooks()` removes every registered hook.
 2. If the batch ran without an exception and the session isn't closed,
-   `_publish_snapshot()` builds a `BatchSnapshot`:
-   - `activations`: a shallow copy of the hook-stored dict.
-   - `gradients`: `{name: param.grad for name, param in
-     model.named_parameters() if param.grad is not None}`.
+   `_publish_snapshot()` builds a `BatchSnapshot` containing **CPU clones**
+   of four tensor dicts:
+   - `activations`: hook-stored module outputs, cloned to CPU.
+   - `activation_gradients`: `activation.grad` for each captured output
+     that has one, cloned to CPU.
+   - `weights`: every `param` from `named_parameters()`, cloned to CPU.
+   - `weight_gradients`: `param.grad` where non-`None`, cloned to CPU.
+   Every clone goes through `tensor.detach().to("cpu", copy=True)`, so the
+   snapshot is fully independent of the live computation graph — the next
+   batch can free / overwrite all of its source tensors without affecting
+   the snapshot.
 3. The training thread calls `_wait_for_proceed()` (described below).
 4. After resume, `_activations` is cleared so the next batch starts clean.
 
-Gradients are read straight off `param.grad` rather than via backward
-hooks. This works because the user's training loop calls
+Weight gradients are read straight off `param.grad` rather than via
+backward hooks. This works because the user's training loop calls
 `optimizer.zero_grad()` at the *start* of their batch body, before
 `loss.backward()`. By `__exit__`, the gradients from this batch are still
-on the parameters. The session does not need to register backward hooks
-or copy grads into a buffer — it reads them at snapshot time and the live
-tensors get reused (or zeroed) by the user's next batch.
+on the parameters; `optimizer.step()` does not touch `.grad`.
 
-The trade-off: activation-gradients (∂loss/∂activation) are not captured.
-Weight gradients (the ones that actually update parameters) are.
+Memory profile: the eager CPU clone costs O(activations + parameters)
+bytes of host memory per captured batch. For small models (ResNet-20)
+this is tens of MB; for large models, a `watch=` filter to opt out of
+some modules is the future escape hatch. In exchange, the snapshot is
+thread-safe to read from the UI without holding any session lock and
+survives arbitrarily long after the training thread has moved on.
 
 ## Resume mechanism
 
@@ -135,12 +145,16 @@ without polling.
 batch has been captured yet. It persists after `close()`, so the UI can
 stay open and present a post-mortem view.
 
-The snapshot holds *references* to tensors that live on the model's device.
-The UI is expected to compute statistics / downsample / render lazily and
-on-device, only producing CPU bytes when the user opens a specific layer's
-view. As a consequence: while the worker is paused, the activations are
-pinned in GPU memory; resuming releases them at the next `__exit__` cleanup
-step.
+The snapshot is a frozen dataclass of CPU tensors. Assignment is a single
+attribute write; readers in the UI thread observe either the previous
+snapshot or the new one — never a torn half-written state. The UI can
+hold references to a snapshot for as long as it wants without preventing
+the next batch from running.
+
+Rendering (PNG mosaics, histograms, summary stats) is still computed
+lazily on the UI thread when a layer card is opened; the eager copy in
+`_publish_snapshot` only moves raw tensor data, not anything pixel-shaped.
+A `(layer, pause_count)` cache in the UI keeps re-opens free.
 
 ## Lifecycle summary
 
