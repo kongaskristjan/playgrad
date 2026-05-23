@@ -25,7 +25,6 @@ from dataclasses import dataclass
 import uvicorn
 from fastapi import FastAPI
 from nicegui import ui
-from torch import nn
 
 from playgrad.session import BatchSnapshot, Session
 from playgrad.ui.graph import build_mermaid
@@ -47,7 +46,7 @@ def serve(
     that isn't the main one.
     """
     mermaid_src = build_mermaid(session.model)
-    layer_names = session.input_names + _hookable_module_names(session.model)
+    layer_names = session.layer_names
 
     fastapi_app = FastAPI()
 
@@ -69,10 +68,6 @@ def serve(
     thread = threading.Thread(target=server.run, name="playgrad-ui", daemon=False)
     thread.start()
     return thread
-
-
-def _hookable_module_names(model: nn.Module) -> list[str]:
-    return [name for name, m in model.named_modules() if m is not model]
 
 
 @dataclass

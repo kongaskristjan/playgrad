@@ -33,7 +33,7 @@ from enum import StrEnum
 from types import TracebackType
 from typing import Self
 
-from torch import Tensor, nn
+from torch import Tensor, fx, nn
 from torch.utils.hooks import RemovableHandle
 
 from playgrad.schedule import BatchPosition, Schedule
@@ -81,7 +81,11 @@ class Session:
         self._activations: dict[str, Tensor] = {}
         self._hook_handles: list[RemovableHandle] = []
         self._snapshot: BatchSnapshot | None = None
-        self._input_names: list[str] = _infer_input_names(model)
+        self._fx_graph: fx.GraphModule | None = _try_trace(model)
+        self._input_names: list[str] = self._compute_input_names()
+        self._layer_names: list[str] = self._compute_layer_names()
+        self._original_forward: object | None = None
+        self._had_instance_forward: bool = False
 
     @property
     def schedule(self) -> Schedule:
@@ -104,6 +108,20 @@ class Session:
     @property
     def input_names(self) -> list[str]:
         return list(self._input_names)
+
+    @property
+    def layer_names(self) -> list[str]:
+        """Ordered list of every per-batch tensor key the snapshot may carry.
+
+        In fx mode, this is the friendly name of every non-output node in the
+        traced graph (inputs, module outputs, function/method results). In the
+        hook fallback, it's `input_names + named_modules`.
+        """
+        return list(self._layer_names)
+
+    @property
+    def fx_traced(self) -> bool:
+        return self._fx_graph is not None
 
     @property
     def pause_count(self) -> int:
@@ -183,6 +201,9 @@ class Session:
 
     def _install_hooks(self) -> None:
         self._activations.clear()
+        if self._fx_graph is not None:
+            self._patch_forward()
+            return
         pre = self.model.register_forward_pre_hook(self._make_pre_hook())
         self._hook_handles.append(pre)
         for name, module in self.model.named_modules():
@@ -192,9 +213,35 @@ class Session:
             self._hook_handles.append(handle)
 
     def _remove_hooks(self) -> None:
+        if self._fx_graph is not None:
+            self._unpatch_forward()
         for h in self._hook_handles:
             h.remove()
         self._hook_handles.clear()
+
+    def _patch_forward(self) -> None:
+        # Stash whatever .forward currently resolves to so we can put it back,
+        # remembering whether it was an instance attribute or a class method.
+        self._had_instance_forward = "forward" in self.model.__dict__
+        self._original_forward = self.model.forward
+        graph = self._fx_graph
+        capture = self._activations
+        assert graph is not None
+
+        def fx_forward(*args: Tensor) -> object:
+            # fx.Interpreter.run takes positional args matched to placeholder
+            # order; kwargs aren't passed through.
+            return _CaptureInterpreter(graph, capture).run(*args)
+
+        object.__setattr__(self.model, "forward", fx_forward)
+
+    def _unpatch_forward(self) -> None:
+        if self._had_instance_forward and self._original_forward is not None:
+            object.__setattr__(self.model, "forward", self._original_forward)
+        elif "forward" in self.model.__dict__:
+            object.__delattr__(self.model, "forward")
+        self._original_forward = None
+        self._had_instance_forward = False
 
     def _make_hook(self, name: str):
         def hook(_module: nn.Module, _inputs: object, output: object) -> None:
@@ -221,6 +268,24 @@ class Session:
                 self._activations[name] = inp
 
         return hook
+
+    def _compute_input_names(self) -> list[str]:
+        if self._fx_graph is not None:
+            return [
+                n.name for n in self._fx_graph.graph.nodes if n.op == "placeholder"
+            ]
+        return _infer_input_names(self.model)
+
+    def _compute_layer_names(self) -> list[str]:
+        if self._fx_graph is not None:
+            return [
+                _fx_friendly_name(n)
+                for n in self._fx_graph.graph.nodes
+                if n.op != "output"
+            ]
+        return self._input_names + [
+            name for name, m in self.model.named_modules() if m is not self.model
+        ]
 
     @staticmethod
     def _cpu_clone(t: Tensor) -> Tensor:
@@ -305,6 +370,49 @@ def start(
     phases: dict[str, int],
 ) -> Session:
     return Session(model, epochs=epochs, phases=phases)
+
+
+def _try_trace(model: nn.Module) -> fx.GraphModule | None:
+    try:
+        return fx.symbolic_trace(model)
+    except Exception:
+        return None
+
+
+def _fx_friendly_name(node: fx.Node) -> str:
+    """The user-facing key for the value produced by an fx node.
+
+    For module calls we use the dotted target ("stem.0") so the UI label
+    matches how the user writes the module. Everything else uses fx's
+    auto-assigned node name ("x", "relu", "relu_1", "add", "mean").
+    """
+    if node.op == "call_module":
+        return str(node.target)
+    return node.name
+
+
+class _CaptureInterpreter(fx.Interpreter):
+    """fx interpreter that snapshots every node's tensor output.
+
+    The interpreter runs the traced graph one node at a time and lets us
+    intercept after each run. We retain_grad on every non-leaf tensor so
+    the user's subsequent loss.backward() populates `.grad`, and store the
+    live tensor under its friendly name in `capture`.
+    """
+
+    def __init__(self, gm: fx.GraphModule, capture: dict[str, Tensor]) -> None:
+        super().__init__(gm)
+        self._capture = capture
+
+    def run_node(self, n: fx.Node) -> object:
+        result = super().run_node(n)
+        if n.op == "output":
+            return result
+        if isinstance(result, Tensor):
+            if result.requires_grad:
+                result.retain_grad()
+            self._capture[_fx_friendly_name(n)] = result
+        return result
 
 
 def _infer_input_names(model: nn.Module) -> list[str]:

@@ -70,19 +70,37 @@ for, and there is no orphan capture without a pause to consume it.
 
 ## Hook lifecycle, gradient pickup, snapshot copy
 
-When `_should_capture` returns True, `__enter__` calls `_install_hooks()`,
-which registers:
+There are two capture paths, picked once at session construction by
+trying `torch.fx.symbolic_trace(model)`.
+
+**fx path (preferred).** When the trace succeeds, the session holds the
+resulting `fx.GraphModule` and `_install_hooks` monkey-patches
+`model.forward` with a function that runs a custom `fx.Interpreter`
+subclass against that graph. The interpreter overrides `run_node` so that
+after every node executes — placeholders, `call_module`, `call_function`,
+`call_method` — it stores the returned tensor in `Session._activations`
+under a friendly key (the dotted target for module calls, the fx node
+name for everything else: `x`, `relu`, `relu_1`, `add`). Each captured
+tensor gets `retain_grad()` so the user's `loss.backward()` populates
+`.grad`. This is what lets `torch.relu(...)`, `out + shortcut(x)`, and
+similar non-module operations show up in the UI on equal footing with
+named modules. `_remove_hooks` restores the original `forward`.
+
+**Hook fallback.** When `fx.symbolic_trace` raises (data-dependent
+control flow, tracing-unfriendly ops, etc.), the session falls back to:
 
 1. A forward **pre-hook** on the root model. It captures each positional
    tensor input under its parameter name (derived from
    `inspect.signature(model.forward)`), e.g. `x` for a model whose
-   forward signature is `forward(self, x)`. Inputs are exposed in the
-   snapshot under those names, alongside module outputs.
+   forward signature is `forward(self, x)`.
 2. A forward hook on every submodule (skipping the root model itself).
    The hook stores `output` in `Session._activations` as a live
    reference *and* calls `output.retain_grad()` on it (when
    `requires_grad`) so that PyTorch populates `output.grad` after
    `loss.backward()`. No backward hook is needed.
+
+In both paths `Session.layer_names` is computed once at construction and
+exposes the same key set the UI later reads from each `BatchSnapshot`.
 
 At `__exit__`:
 

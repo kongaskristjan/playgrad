@@ -38,7 +38,7 @@ def _make_session(epochs: int = 2, phases: dict[str, int] | None = None) -> tupl
 
 
 def _run_in_thread(target) -> threading.Thread:
-    thread = threading.Thread(target=target)
+    thread = threading.Thread(target=target, daemon=True)
     thread.start()
     return thread
 
@@ -243,6 +243,103 @@ def test_input_name_comes_from_forward_signature() -> None:
 
     session.detach()
     thread.join(timeout=5)
+
+
+def test_fx_mode_captures_function_call_outputs() -> None:
+    """When fx.symbolic_trace succeeds, call_function results show up too."""
+
+    class BasicBlockLike(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv1 = nn.Conv2d(3, 4, kernel_size=3, padding=1)
+            self.bn1 = nn.BatchNorm2d(4)
+
+        def forward(self, x: Tensor) -> Tensor:
+            return torch.relu(self.bn1(self.conv1(x)))
+
+    model = BasicBlockLike()
+    session = playgrad.start(model, epochs=1, phases={"train": 1})
+    assert session.fx_traced
+    assert "relu" in session.layer_names
+    assert "conv1" in session.layer_names
+    assert "bn1" in session.layer_names
+
+    def loop() -> None:
+        with session.batch(phase="train", epoch=0):
+            x = torch.randn(2, 3, 4, 4)
+            y = torch.randint(0, 2, (2, 4, 4))
+            model.zero_grad(set_to_none=True)
+            logits = model(x)
+            loss = nn.functional.cross_entropy(logits, y)
+            loss.backward()
+
+    thread = _run_in_thread(loop)
+    assert session.wait_until_paused(timeout=5)
+    snap = session.snapshot
+    assert snap is not None
+    assert "relu" in snap.activations
+    # relu was applied to a tensor that requires grad, so we should also
+    # have captured the gradient of its output.
+    assert "relu" in snap.activation_gradients
+
+    session.detach()
+    thread.join(timeout=5)
+
+
+def test_fx_mode_restores_original_forward_after_batch() -> None:
+    """The interpreter patch is reverted before the worker pauses, so the
+    user's original forward is the live one whenever the batch isn't actively
+    running. (The patch is only in place between __enter__ and __exit__.)"""
+
+    class Tiny(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = nn.Linear(4, 2)
+
+        def forward(self, x: Tensor) -> Tensor:
+            return torch.relu(self.fc(x))
+
+    model = Tiny()
+    session = playgrad.start(model, epochs=1, phases={"train": 1})
+    original_forward = model.forward
+    assert "forward" not in model.__dict__
+
+    def loop() -> None:
+        with session.batch(phase="train", epoch=0):
+            x = torch.randn(2, 4)
+            y = torch.randint(0, 2, (2,))
+            model.zero_grad(set_to_none=True)
+            loss = nn.functional.cross_entropy(model(x), y)
+            loss.backward()
+
+    thread = _run_in_thread(loop)
+    try:
+        assert session.wait_until_paused(timeout=5)
+        assert "forward" not in model.__dict__
+        assert model.forward == original_forward
+    finally:
+        session.detach()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert "forward" not in model.__dict__
+
+
+def test_fx_failure_falls_back_to_hooks() -> None:
+    class Dynamic(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = nn.Linear(4, 2)
+
+        def forward(self, x: Tensor) -> Tensor:
+            if x.sum() > 0:
+                return self.fc(x)
+            return self.fc(-x)
+
+    model = Dynamic()
+    session = playgrad.start(model, epochs=1, phases={"train": 1})
+    assert not session.fx_traced
+    # Hook-mode layer_names: inputs + module names.
+    assert session.layer_names == ["x", "fc"]
 
 
 def test_snapshot_tensors_are_cpu_and_independent() -> None:
