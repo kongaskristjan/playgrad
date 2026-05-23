@@ -11,9 +11,9 @@ disabled so it survives being started from a non-main thread). Layout:
   scrollable strips — activations on top, activation gradients below —
   sharing a single horizontal scrollbar so they pan together.
 
-A `ui.timer` in each connection polls `session.pause_count`; when it
-advances, the page re-renders all per-layer strips against
-`session.snapshot`.
+A `ui.timer` in each connection polls `session.snapshot`; when a new
+snapshot is published, the page re-renders all per-layer strips against
+it.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def serve(
 @dataclass
 class _PageState:
     sample_idx: int = 0
-    last_pause_count: int = -1
+    last_snapshot: BatchSnapshot | None = None
 
 
 def _build_page(
@@ -116,12 +116,9 @@ def _build_page(
         if snap is None:
             return
         pos = snap.position
-        position_label.text = (
-            f"epoch {pos.epoch} | {pos.phase} batch {pos.batch_idx}"
-            f" | pause {session.pause_count}"
-        )
-        if session.pause_count != state.last_pause_count:
-            state.last_pause_count = session.pause_count
+        position_label.text = f"epoch {pos.epoch} | {pos.phase} batch {pos.batch_idx}"
+        if snap is not state.last_snapshot:
+            state.last_snapshot = snap
             _render_all(state, layer_views, snap)
 
     ui.timer(0.2, tick)
