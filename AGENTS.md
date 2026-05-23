@@ -31,7 +31,7 @@
 
 ## Commit discipline
 
-- Every user requested change should be accompanied by a commit. No need to ask for permission.
+- Every user requested change should be accompanied by a commit. Don't ask for permission, just do it as the last step.
 - Most commits should include corresponding test additions or changes. High level changes should incorporate documentation changes.
 - Before committing: `uv run pytest && uv run ty check`
 - Before committing: run the code. For UI testing, you can run some of the examples and use the playwright MCP.
