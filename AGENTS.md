@@ -9,7 +9,8 @@
   - 'playgrad/' - Playgrad visualization library (no training)
   - `examples/` - Runnable Python examples (fully contains training logic, each example in a separate subdirectory)
   - `tests/` - Tests for both examples and the playgrad library
-  - `README.md` - Usage and high level technical documentation
+  - `README.md` - How to run examples and the playgrad library API usage
+  - `INTERNALS.md` - High level overview of playgrad library internals
 
 ## Code quality
 
@@ -34,5 +35,5 @@
 - Most commits should include corresponding test additions or changes. High level changes should incorporate documentation changes.
 - Before committing: `uv run pytest && uv run ty check`
 - Before committing: run the code
-- `README.md` should be kept up to date
+- `README.md` and `INTERNALS.md` should be kept up to date
 
