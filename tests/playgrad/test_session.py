@@ -43,9 +43,9 @@ def _run_in_thread(target) -> threading.Thread:
     return thread
 
 
-def test_run_mode_skips_capture_for_every_batch() -> None:
+def test_detach_skips_capture_for_every_batch() -> None:
     session, model = _make_session()
-    session.continue_run()
+    session.detach()
 
     captured: list[bool] = []
     for epoch in range(2):
@@ -57,6 +57,34 @@ def test_run_mode_skips_capture_for_every_batch() -> None:
 
     assert captured == [False] * 8
     assert session.snapshot is None
+
+
+def test_step_run_pauses_only_at_last_overall() -> None:
+    session, model = _make_session(epochs=2, phases={"train": 2, "val": 2})
+
+    captured_positions: list[tuple[str, int, int]] = []
+
+    def loop() -> None:
+        for epoch in range(2):
+            for phase, n in [("train", 2), ("val", 2)]:
+                for _ in range(n):
+                    with session.batch(phase=phase, epoch=epoch) as ctx:
+                        _train_step(model)
+                    if ctx.captured and ctx.position is not None:
+                        captured_positions.append(
+                            (ctx.position.phase, ctx.position.epoch, ctx.position.batch_idx)
+                        )
+
+    session.step_run()
+    thread = _run_in_thread(loop)
+
+    assert session.wait_until_paused(timeout=5)
+    session.close()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert captured_positions == [("val", 1, 1)]
+    assert session.snapshot is not None
+    assert session.snapshot.position.is_last_overall
 
 
 def test_step_mode_pauses_on_every_batch() -> None:
@@ -77,7 +105,7 @@ def test_step_mode_pauses_on_every_batch() -> None:
     assert session.wait_until_paused(after_pauses=1, timeout=5)
     assert session.snapshot is not None
     assert session.snapshot.position.batch_idx == 1
-    session.continue_run()
+    session.detach()
 
     thread.join(timeout=5)
     assert not thread.is_alive()
@@ -103,7 +131,7 @@ def test_until_phase_change_captures_only_phase_end() -> None:
     thread = _run_in_thread(loop)
 
     assert session.wait_until_paused(timeout=5)
-    session.continue_run()
+    session.detach()
 
     thread.join(timeout=5)
     assert not thread.is_alive()
@@ -130,7 +158,7 @@ def test_until_epoch_change_captures_only_epoch_end() -> None:
     thread = _run_in_thread(loop)
 
     assert session.wait_until_paused(timeout=5)
-    session.continue_run()
+    session.detach()
 
     thread.join(timeout=5)
     assert not thread.is_alive()
@@ -155,13 +183,13 @@ def test_snapshot_contains_activations_and_gradients() -> None:
     for name, grad in snap.gradients.items():
         assert grad.shape == expected_shapes[name].shape
 
-    session.continue_run()
+    session.detach()
     thread.join(timeout=5)
 
 
 def test_stop_then_step_pauses_at_next_batch() -> None:
     session, model = _make_session(epochs=1, phases={"train": 3})
-    session.continue_run()
+    session.detach()
 
     captured: list[bool] = []
 
@@ -174,7 +202,7 @@ def test_stop_then_step_pauses_at_next_batch() -> None:
     thread = _run_in_thread(loop)
     session.stop()  # next batch boundary should pause
     assert session.wait_until_paused(timeout=5)
-    session.continue_run()
+    session.detach()
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert sum(captured) >= 1
@@ -182,7 +210,7 @@ def test_stop_then_step_pauses_at_next_batch() -> None:
 
 def test_set_schedule_mid_run() -> None:
     session, model = _make_session(epochs=1, phases={"train": 2})
-    session.continue_run()
+    session.detach()
 
     with session.batch(phase="train", epoch=0):
         _train_step(model)
@@ -220,7 +248,7 @@ def test_close_before_any_batch_is_safe() -> None:
 
 def test_unknown_phase_raises_through_context() -> None:
     session, model = _make_session(epochs=1, phases={"train": 1})
-    session.continue_run()
+    session.detach()
     with pytest.raises(ValueError, match="unknown phase"):
         with session.batch(phase="bogus", epoch=0):
             _train_step(model)
@@ -259,5 +287,5 @@ def test_hooks_removed_after_each_batch() -> None:
     # Between pauses, hooks should have been removed even though we still hold
     # the activations from the previous batch on the snapshot.
     assert session._hook_handles == []  # type: ignore[reportPrivateUsage]
-    session.continue_run()
+    session.detach()
     thread.join(timeout=5)

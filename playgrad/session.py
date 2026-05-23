@@ -17,10 +17,11 @@ parameter `.grad` is still populated when the context manager exits, so the
 session reads it straight off the model — no backward hooks needed.
 
 The UI (added later) drives the session by calling `stop`, `step_batch`,
-`step_phase`, `step_epoch`, `continue_run`, and finally `close`. Whether the
-session captures activations/gradients for a given batch is decided up-front
-at `__enter__` from the schedule + current mode, so forward hooks are only
-installed for batches that will actually be inspected.
+`step_phase`, `step_epoch`, `step_run`, `detach`, and finally `close`.
+Whether the session captures activations/gradients for a given batch is
+decided up-front at `__enter__` from the schedule + current mode, so
+forward hooks are only installed for batches that will actually be
+inspected.
 """
 
 from __future__ import annotations
@@ -41,7 +42,8 @@ class Mode(StrEnum):
     STEP = "step"
     UNTIL_PHASE_CHANGE = "until_phase_change"
     UNTIL_EPOCH_CHANGE = "until_epoch_change"
-    RUN = "run"
+    UNTIL_END = "until_end"
+    DETACH = "detach"
 
 
 @dataclass(frozen=True)
@@ -117,8 +119,11 @@ class Session:
     def step_epoch(self) -> None:
         self._set_mode(Mode.UNTIL_EPOCH_CHANGE, resume=True)
 
-    def continue_run(self) -> None:
-        self._set_mode(Mode.RUN, resume=True)
+    def step_run(self) -> None:
+        self._set_mode(Mode.UNTIL_END, resume=True)
+
+    def detach(self) -> None:
+        self._set_mode(Mode.DETACH, resume=True)
 
     def close(self) -> None:
         with self._cv:
@@ -156,7 +161,9 @@ class Session:
                 return pos.is_last_in_phase
             case Mode.UNTIL_EPOCH_CHANGE:
                 return pos.is_last_in_epoch
-            case Mode.RUN:
+            case Mode.UNTIL_END:
+                return pos.is_last_overall
+            case Mode.DETACH:
                 return False
 
     def _install_hooks(self) -> None:
