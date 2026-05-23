@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import torch
 from torch import nn
 
 from playgrad.ui.graph import CONFIG_HEADER, build_mermaid
@@ -17,8 +20,21 @@ class TwoLayer(nn.Module):
         )
         self.fc = nn.Linear(8, 4)
 
-    def forward(self, x):  # pragma: no cover - structural test only
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(self.stem(x).mean(dim=(-1, -2)))
+
+
+class DynamicShape(nn.Module):
+    """Data-dependent control flow defeats fx.symbolic_trace."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.sum() > 0:
+            return self.fc(x)
+        return x
 
 
 def test_includes_config_header_and_flowchart() -> None:
@@ -27,25 +43,45 @@ def test_includes_config_header_and_flowchart() -> None:
     assert "flowchart TD" in src
 
 
-def test_has_node_per_submodule() -> None:
+def test_fx_emits_data_flow_edges() -> None:
     src = build_mermaid(TwoLayer())
-    for name in ("stem", "stem.0", "stem.1", "stem.2", "fc"):
-        assert name in src
+    # fx unwraps the Sequential and gives a linear data-flow chain:
+    # x -> stem.0 -> stem.1 -> stem.2 -> mean -> fc -> output
+    assert "x --> stem_0" in src
+    assert "stem_0 --> stem_1" in src
+    assert "stem_1 --> stem_2" in src
+    # mean is a tensor method call, name will be `mean`
+    assert "stem_2 --> mean" in src
+    assert "mean --> fc" in src
 
 
-def test_has_parent_to_child_edges() -> None:
+def test_fx_labels_modules_with_class_name() -> None:
     src = build_mermaid(TwoLayer())
-    # nn.Sequential children → stem.0/1/2
-    assert "stem --> stem_0" in src
-    assert "stem --> stem_1" in src
-    assert "stem --> stem_2" in src
-    # root → top-level children
-    assert "root --> stem" in src
-    assert "root --> fc" in src
-
-
-def test_node_labels_include_class_name() -> None:
-    src = build_mermaid(TwoLayer())
-    assert "BatchNorm2d" in src
     assert "Conv2d" in src
+    assert "BatchNorm2d" in src
+    assert "ReLU" in src
     assert "Linear" in src
+
+
+def test_falls_back_to_hierarchy_for_untraceable_model() -> None:
+    src = build_mermaid(DynamicShape())
+    # The hierarchy fallback always emits a synthetic root and parent->child edges.
+    assert "root --> fc" in src
+    assert "Linear" in src
+
+
+def test_hierarchy_fallback_root_label_can_be_customized() -> None:
+    src = build_mermaid(DynamicShape(), root_label="my_model")
+    assert '"my_model"' in src
+
+
+def test_handles_modules_with_tuple_args(monkeypatch: Any) -> None:
+    # Walk recurses into tuples/lists, so calls like torch.cat([a, b], dim=1)
+    # still produce edges from both inputs.
+    class CatModel(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.cat([x, x], dim=1)
+
+    src = build_mermaid(CatModel())
+    # The single 'x' input should feed the cat node (appears twice).
+    assert "x --> cat" in src

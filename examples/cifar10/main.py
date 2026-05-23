@@ -36,8 +36,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--playgrad-port",
         type=int,
-        default=None,
-        help="If set, launch the playgrad UI on this port and pause on the first batch.",
+        default=8080,
+        help="Port for the playgrad UI (default 8080).",
+    )
+    parser.add_argument(
+        "--no-playgrad",
+        action="store_true",
+        help="Disable the playgrad UI (run as plain training).",
     )
     return parser.parse_args()
 
@@ -78,7 +83,7 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     session: playgrad.Session | None = None
-    if args.playgrad_port is not None:
+    if not args.no_playgrad:
         session = playgrad.start(
             model,
             epochs=args.epochs,

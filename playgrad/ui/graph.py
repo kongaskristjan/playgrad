@@ -1,10 +1,19 @@
-"""Build a Mermaid TD diagram source from a model's module hierarchy."""
+"""Build a Mermaid TD diagram of the compute graph.
+
+`torch.fx.symbolic_trace` produces a true data-flow graph — for a ResNet
+that means vertical chains with branches at each residual block — which is
+what users expect when they ask for "the compute graph". If symbolic tracing
+fails (data-dependent control flow, untraceable ops, etc.), we fall back to
+the simpler parent->child module hierarchy.
+"""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
-from torch import nn
+import torch
+from torch import fx, nn
 
 CONFIG_HEADER: str = """---
 config:
@@ -20,27 +29,79 @@ ROOT_ID: str = "root"
 
 
 def build_mermaid(model: nn.Module, *, root_label: str = "model") -> str:
-    """Return Mermaid source for the model's module hierarchy.
+    """Return Mermaid source for the model's compute graph.
 
-    Each submodule becomes a node labelled `<full_name><br/><class>`; edges
-    run from parent to direct children, so containers like `nn.Sequential`
-    appear with their children fanned out underneath.
+    Tries `torch.fx.symbolic_trace` first; on any tracing failure (a model
+    with dynamic control flow, custom ops, etc.) falls back to the static
+    module hierarchy tree rooted at a synthetic "root" node.
     """
-    lines: list[str] = [CONFIG_HEADER, "flowchart TD", f'  {ROOT_ID}["{root_label}"]']
+    try:
+        traced = fx.symbolic_trace(model)
+    except Exception:
+        return _build_from_hierarchy(model, root_label=root_label)
+    return _build_from_fx(model, traced)
 
+
+def _build_from_fx(model: nn.Module, traced: fx.GraphModule) -> str:
+    lines: list[str] = [CONFIG_HEADER, "flowchart TD"]
+    for node in traced.graph.nodes:
+        lines.append(_node_def(node, model))
+    for node in traced.graph.nodes:
+        for arg in _node_inputs(node):
+            lines.append(f"  {_slug(arg.name)} --> {_slug(node.name)}")
+    return "\n".join(lines)
+
+
+def _node_def(node: fx.Node, model: nn.Module) -> str:
+    node_id = _slug(node.name)
+    if node.op == "placeholder":
+        return f'  {node_id}(["in: {node.name}"])'
+    if node.op == "output":
+        return f'  {node_id}(["out"])'
+    if node.op == "call_module":
+        sub = model.get_submodule(str(node.target))
+        label = f"{node.target}<br/>{type(sub).__name__}"
+        return f'  {node_id}["{label}"]'
+    if node.op == "call_function":
+        name = getattr(node.target, "__name__", str(node.target))
+        return f'  {node_id}(("{name}"))'
+    if node.op == "call_method":
+        return f'  {node_id}((".{node.target}"))'
+    return f'  {node_id}["{node.name}"]'
+
+
+def _node_inputs(node: fx.Node) -> Iterator[fx.Node]:
+    for a in node.args:
+        yield from _walk_fx_nodes(a)
+    for v in node.kwargs.values():
+        yield from _walk_fx_nodes(v)
+
+
+def _walk_fx_nodes(value: object) -> Iterator[fx.Node]:
+    if isinstance(value, fx.Node):
+        yield value
+        return
+    if isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _walk_fx_nodes(v)
+        return
+    if isinstance(value, dict):
+        for v in value.values():
+            yield from _walk_fx_nodes(v)
+
+
+def _build_from_hierarchy(model: nn.Module, *, root_label: str) -> str:
+    lines: list[str] = [CONFIG_HEADER, "flowchart TD", f'  {ROOT_ID}["{root_label}"]']
     for full_name, module in model.named_modules():
         if module is model:
             continue
-        node_id = _slug(full_name)
         label = f"{full_name}<br/>{type(module).__name__}"
-        lines.append(f'  {node_id}["{label}"]')
-
+        lines.append(f'  {_slug(full_name)}["{label}"]')
     for full_name, module in model.named_modules():
         parent_id = ROOT_ID if module is model else _slug(full_name)
         for child_name, _ in module.named_children():
             child_full = f"{full_name}.{child_name}" if full_name else child_name
             lines.append(f"  {parent_id} --> {_slug(child_full)}")
-
     return "\n".join(lines)
 
 

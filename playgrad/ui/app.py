@@ -146,30 +146,35 @@ def _render_all(
 
 
 class _LayerView:
+    """One card per submodule, with activation + activation-gradient strips.
+
+    The strips are raw `<img>` elements with `max-width: none`, so each PNG
+    renders at its natural pixel width and the wrapping `overflow-x-auto`
+    div produces a shared horizontal scrollbar. NiceGUI's `ui.image` uses
+    Quasar's responsive q-img instead, which squishes the strip to the
+    card width — not what we want here.
+    """
+
     def __init__(self, name: str) -> None:
         self.name = name
         with ui.card().classes("w-full mb-2"):
             ui.label(name).classes("font-mono text-sm")
             with ui.element("div").classes("w-full overflow-x-auto"):
-                self.act_image = ui.image().classes("max-w-none")
-                self.grad_image = ui.image().classes("max-w-none")
-        self.act_image.set_visibility(False)
-        self.grad_image.set_visibility(False)
+                self.act_html = ui.html("")
+                self.grad_html = ui.html("")
 
     def update(self, activation, gradient, sample_idx: int) -> None:
         act_png = render_strip(activation, sample_idx, kind="activation")
         grad_png = render_strip(gradient, sample_idx, kind="gradient")
-        _set_or_hide(self.act_image, act_png)
-        _set_or_hide(self.grad_image, grad_png)
+        self.act_html.set_content(_img_tag(act_png))
+        self.grad_html.set_content(_img_tag(grad_png))
 
 
-def _set_or_hide(image: ui.image, png: bytes | None) -> None:
+def _img_tag(png: bytes | None) -> str:
     if png is None:
-        image.set_visibility(False)
-        return
-    image.set_source(_data_url(png))
-    image.set_visibility(True)
-
-
-def _data_url(png: bytes) -> str:
-    return f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+        return ""
+    b64 = base64.b64encode(png).decode("ascii")
+    return (
+        f'<img src="data:image/png;base64,{b64}" '
+        'style="display:block; max-width:none;" />'
+    )

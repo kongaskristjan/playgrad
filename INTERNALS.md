@@ -162,10 +162,15 @@ A `(layer, pause_count)` cache in the UI keeps re-opens free.
 drives `Session` via the five control methods plus `detach` and `close`.
 It does not touch tensors directly until they need to be rendered.
 
-- `playgrad.ui.graph.build_mermaid(model)` walks `model.named_modules()`
-  once at server start, emits the Mermaid TD source with the configured
-  elk header, and produces one node per submodule + parent→child edges
-  rooted at a synthetic `root` node.
+- `playgrad.ui.graph.build_mermaid(model)` produces the Mermaid TD source
+  for the architecture view. It tries `torch.fx.symbolic_trace(model)`
+  first, which yields a real data-flow graph — vertical chains, with
+  branches and merges at residual blocks. For models that aren't
+  fx-traceable (dynamic control flow, custom ops), it falls back to a
+  static module-hierarchy tree rooted at a synthetic `root` node. Nodes
+  use different Mermaid shapes per fx op (rectangles for `call_module`,
+  circles for `call_function` / `call_method`, stadiums for
+  `placeholder` / `output`).
 - `playgrad.ui.render.render_strip(tensor, sample_idx, kind=...)` is the
   only function that turns CPU tensors into PNG bytes:
   - For per-sample shape `[C, H, W]` it interpolates each channel to a
