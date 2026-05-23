@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+import playgrad
 from examples.cifar10.data import build_dataloaders
 from examples.cifar10.resnet import ResNetCIFAR
 from examples.cifar10.train import evaluate, train_one_epoch
@@ -32,6 +33,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--playgrad-port",
+        type=int,
+        default=None,
+        help="If set, launch the playgrad UI on this port and pause on the first batch.",
+    )
     return parser.parse_args()
 
 
@@ -70,13 +77,27 @@ def main() -> None:
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    session: playgrad.Session | None = None
+    if args.playgrad_port is not None:
+        session = playgrad.start(
+            model,
+            epochs=args.epochs,
+            phases={"train": len(train_loader), "val": len(test_loader)},
+        )
+        playgrad.serve(session, port=args.playgrad_port)
+        print(f"playgrad UI at http://127.0.0.1:{args.playgrad_port}")
+
     best_acc = 0.0
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.time()
         train_stats = train_one_epoch(
-            model, train_loader, optimizer, criterion, device, amp_dtype=amp_dtype
+            model, train_loader, optimizer, criterion, device,
+            amp_dtype=amp_dtype, session=session, epoch=epoch - 1,
         )
-        test_stats = evaluate(model, test_loader, criterion, device, amp_dtype=amp_dtype)
+        test_stats = evaluate(
+            model, test_loader, criterion, device,
+            amp_dtype=amp_dtype, session=session, epoch=epoch - 1,
+        )
         scheduler.step()
 
         elapsed = time.time() - epoch_start
@@ -97,6 +118,9 @@ def main() -> None:
                 )
 
     print(f"Best test accuracy: {best_acc:.4f}")
+
+    if session is not None:
+        session.close()
 
 
 if __name__ == "__main__":

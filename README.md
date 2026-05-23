@@ -35,6 +35,9 @@ Useful flags:
 - `--device` — `cpu`, `cuda`, or `mps`. Auto-detected when omitted.
 - `--bf16` — wrap forward/loss in `torch.autocast` with `bfloat16` (no `GradScaler` needed).
 - `--checkpoint path/to/file.pt` — save best-by-test-accuracy weights.
+- `--playgrad-port 8080` — launch the playgrad UI on this port. Training
+  pauses on the first batch; open the URL to drive it with the step / detach
+  controls.
 
 The script uses SGD with Nesterov momentum, cosine LR annealing, and the
 standard CIFAR10 augmentations (random crop with 4-pixel padding + horizontal

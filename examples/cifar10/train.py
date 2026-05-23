@@ -10,6 +10,8 @@ import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
+from playgrad import Session
+
 
 @dataclass
 class EpochStats:
@@ -31,6 +33,17 @@ def _autocast(device: torch.device, amp_dtype: torch.dtype | None) -> Iterator[N
         yield
 
 
+@contextlib.contextmanager
+def _maybe_session_batch(
+    session: Session | None, *, phase: str, epoch: int
+) -> Iterator[None]:
+    if session is None:
+        yield
+        return
+    with session.batch(phase=phase, epoch=epoch):
+        yield
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -38,25 +51,29 @@ def train_one_epoch(
     criterion: nn.Module,
     device: torch.device,
     amp_dtype: torch.dtype | None = None,
+    *,
+    session: Session | None = None,
+    epoch: int = 0,
 ) -> EpochStats:
     model.train()
     total_loss = 0.0
     total_acc = 0.0
     n_batches = 0
     for inputs, targets in loader:
-        inputs = inputs.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
+        with _maybe_session_batch(session, phase="train", epoch=epoch):
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
 
-        optimizer.zero_grad(set_to_none=True)
-        with _autocast(device, amp_dtype):
-            logits = model(inputs)
-            loss = criterion(logits, targets)
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with _autocast(device, amp_dtype):
+                logits = model(inputs)
+                loss = criterion(logits, targets)
+            loss.backward()
+            optimizer.step()
 
-        total_loss += loss.item()
-        total_acc += _accuracy(logits, targets)
-        n_batches += 1
+            total_loss += loss.item()
+            total_acc += _accuracy(logits, targets)
+            n_batches += 1
 
     return EpochStats(loss=total_loss / n_batches, accuracy=total_acc / n_batches)
 
@@ -68,22 +85,26 @@ def evaluate(
     criterion: nn.Module,
     device: torch.device,
     amp_dtype: torch.dtype | None = None,
+    *,
+    session: Session | None = None,
+    epoch: int = 0,
 ) -> EpochStats:
     model.eval()
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
     for inputs, targets in loader:
-        inputs = inputs.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
+        with _maybe_session_batch(session, phase="val", epoch=epoch):
+            inputs = inputs.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
 
-        with _autocast(device, amp_dtype):
-            logits = model(inputs)
-            loss = criterion(logits, targets)
+            with _autocast(device, amp_dtype):
+                logits = model(inputs)
+                loss = criterion(logits, targets)
 
-        total_loss += loss.item() * targets.size(0)
-        total_correct += int((logits.argmax(dim=1) == targets).sum().item())
-        total_samples += targets.size(0)
+            total_loss += loss.item() * targets.size(0)
+            total_correct += int((logits.argmax(dim=1) == targets).sum().item())
+            total_samples += targets.size(0)
 
     return EpochStats(
         loss=total_loss / total_samples,

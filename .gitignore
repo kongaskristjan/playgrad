@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .ty_cache/
 .claude/
+.playwright-mcp/
 data/
 *.pt
 *.pth
