@@ -53,6 +53,37 @@ flip + normalisation).
 `resnet20()` is a convenience constructor (`blocks_per_stage=3`,
 ~270k parameters).
 
+## Using the `playgrad` library
+
+```python
+import playgrad
+
+session = playgrad.start(model, epochs=50, phases={"train": 196, "val": 40})
+playgrad.serve(session, port=8080)
+
+for epoch in range(50):
+    for batch in train_loader:
+        with session.batch(phase="train", epoch=epoch):
+            optimizer.zero_grad()
+            loss = ...
+            loss.backward()
+            optimizer.step()
+    for batch in val_loader:
+        with session.batch(phase="val", epoch=epoch):
+            ...
+
+session.close()  # UI keeps running so you can browse the last snapshot
+```
+
+Open `http://localhost:8080` while training is running. The top bar drives
+the session with five "go" buttons — `stop`, `step batch`, `step phase`,
+`step epoch`, `step run` — and `detach` (run unattended without further
+pauses). The left pane shows the module hierarchy as a Mermaid diagram;
+the right pane shows one card per submodule with horizontally-scrollable
+activation and activation-gradient strips for the selected sample.
+
+See `INTERNALS.md` for the architecture overview.
+
 ## Tests
 
 ```bash

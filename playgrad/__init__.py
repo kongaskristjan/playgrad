@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from playgrad.schedule import BatchPosition, Schedule
 from playgrad.session import BatchSnapshot, Mode, Session, start
+from playgrad.ui import serve
 
 __all__ = [
     "BatchPosition",
@@ -17,5 +18,6 @@ __all__ = [
     "Mode",
     "Schedule",
     "Session",
+    "serve",
     "start",
 ]

@@ -156,6 +156,47 @@ lazily on the UI thread when a layer card is opened; the eager copy in
 `_publish_snapshot` only moves raw tensor data, not anything pixel-shaped.
 A `(layer, pause_count)` cache in the UI keeps re-opens free.
 
+## UI layer
+
+`playgrad.ui` is a thin NiceGUI app that reads `Session.snapshot` and
+drives `Session` via the five control methods plus `detach` and `close`.
+It does not touch tensors directly until they need to be rendered.
+
+- `playgrad.ui.graph.build_mermaid(model)` walks `model.named_modules()`
+  once at server start, emits the Mermaid TD source with the configured
+  elk header, and produces one node per submodule + parent→child edges
+  rooted at a synthetic `root` node.
+- `playgrad.ui.render.render_strip(tensor, sample_idx, kind=...)` is the
+  only function that turns CPU tensors into PNG bytes:
+  - For per-sample shape `[C, H, W]` it interpolates each channel to a
+    `TILE_SIZE × TILE_SIZE` tile and concatenates horizontally; result
+    is a `[TILE_SIZE, C × TILE_SIZE]` PNG.
+  - For `[F]` it builds a single short heatmap row, downsampled to at
+    most `LINEAR_MAX_BINS` bins when `F` is large.
+  - Sequential grayscale colormap for activations, diverging
+    blue-white-red for gradients. PNG `compress_level=1` — wire size
+    doesn't matter, encode speed does.
+  - Other per-sample shapes return `None`; the UI hides those images.
+- `playgrad.ui.app.serve(session, port=..., host=...)` runs the NiceGUI
+  app on a background thread. NiceGUI is mounted onto a bare FastAPI
+  app via `ui.run_with`, which is then served by `uvicorn.Server` from
+  the thread. `install_signal_handlers` is patched to a no-op because
+  uvicorn would otherwise try to register SIGINT/SIGTERM handlers from
+  a non-main thread. The thread is non-daemon, so the UI stays alive
+  even after the training script's main thread returns — the user
+  closes the browser / Ctrl-Cs when they're done browsing post-mortem.
+- The page handler creates one `_LayerView` per submodule (a card with
+  two `ui.image` strips inside a shared horizontal scroll container)
+  and a `ui.timer` that, every 200 ms, checks `session.pause_count`. If
+  it has advanced since the last render, every layer view re-renders
+  against the new snapshot, slicing each tensor at the current
+  `sample_idx` (driven by a single `ui.number` input in the top bar).
+- Rendering is intentionally eager when a new snapshot lands — for
+  ResNet-20 it takes well under a second, and during `RUN` / `DETACH`
+  modes no snapshots are produced so the UI is idle. For larger models
+  this is the natural point to add viewport-aware lazy rendering, but
+  the current code path keeps the wiring simple.
+
 ## Lifecycle summary
 
 ```text
