@@ -47,7 +47,7 @@ def serve(
     that isn't the main one.
     """
     mermaid_src = build_mermaid(session.model)
-    layer_names = _hookable_module_names(session.model)
+    layer_names = session.input_names + _hookable_module_names(session.model)
 
     fastapi_app = FastAPI()
 

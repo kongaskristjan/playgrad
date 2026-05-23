@@ -26,6 +26,7 @@ inspected.
 
 from __future__ import annotations
 
+import inspect
 import threading
 from dataclasses import dataclass
 from enum import StrEnum
@@ -80,6 +81,7 @@ class Session:
         self._activations: dict[str, Tensor] = {}
         self._hook_handles: list[RemovableHandle] = []
         self._snapshot: BatchSnapshot | None = None
+        self._input_names: list[str] = _infer_input_names(model)
 
     @property
     def schedule(self) -> Schedule:
@@ -98,6 +100,10 @@ class Session:
     def closed(self) -> bool:
         with self._cv:
             return self._closed
+
+    @property
+    def input_names(self) -> list[str]:
+        return list(self._input_names)
 
     @property
     def pause_count(self) -> int:
@@ -177,6 +183,8 @@ class Session:
 
     def _install_hooks(self) -> None:
         self._activations.clear()
+        pre = self.model.register_forward_pre_hook(self._make_pre_hook())
+        self._hook_handles.append(pre)
         for name, module in self.model.named_modules():
             if module is self.model:
                 continue
@@ -195,6 +203,22 @@ class Session:
             if output.requires_grad:
                 output.retain_grad()
             self._activations[name] = output
+
+        return hook
+
+    def _make_pre_hook(self):
+        def hook(_module: nn.Module, inputs: tuple[object, ...]) -> None:
+            for i, inp in enumerate(inputs):
+                if not isinstance(inp, Tensor):
+                    continue
+                name = (
+                    self._input_names[i]
+                    if i < len(self._input_names)
+                    else f"arg_{i}"
+                )
+                if inp.requires_grad:
+                    inp.retain_grad()
+                self._activations[name] = inp
 
         return hook
 
@@ -281,3 +305,21 @@ def start(
     phases: dict[str, int],
 ) -> Session:
     return Session(model, epochs=epochs, phases=phases)
+
+
+def _infer_input_names(model: nn.Module) -> list[str]:
+    """Positional parameter names of model.forward (excluding self/*args/**kwargs)."""
+    try:
+        params = inspect.signature(model.forward).parameters
+    except (TypeError, ValueError):
+        return ["x"]
+    names = [
+        name
+        for name, p in params.items()
+        if p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    return names or ["x"]

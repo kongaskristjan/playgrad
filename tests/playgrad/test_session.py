@@ -194,6 +194,57 @@ def test_snapshot_contains_all_four_tensor_categories() -> None:
     thread.join(timeout=5)
 
 
+def test_snapshot_captures_model_input_as_x() -> None:
+    session, model = _make_session(epochs=1, phases={"train": 1})
+
+    def loop() -> None:
+        with session.batch(phase="train", epoch=0):
+            _train_step(model)
+
+    thread = _run_in_thread(loop)
+    assert session.wait_until_paused(timeout=5)
+    snap = session.snapshot
+    assert snap is not None
+    assert "x" in snap.activations
+    assert snap.activations["x"].shape == (2, 4)
+    assert session.input_names == ["x"]
+
+    session.detach()
+    thread.join(timeout=5)
+
+
+def test_input_name_comes_from_forward_signature() -> None:
+    class NamedInput(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fc = nn.Linear(4, 3)
+
+        def forward(self, image: Tensor) -> Tensor:
+            return self.fc(image)
+
+    model = NamedInput()
+    session = playgrad.start(model, epochs=1, phases={"train": 1})
+    assert session.input_names == ["image"]
+
+    def loop() -> None:
+        with session.batch(phase="train", epoch=0):
+            x = torch.randn(2, 4)
+            y = torch.randint(0, 3, (2,))
+            model.zero_grad(set_to_none=True)
+            loss = nn.functional.cross_entropy(model(x), y)
+            loss.backward()
+
+    thread = _run_in_thread(loop)
+    assert session.wait_until_paused(timeout=5)
+    snap = session.snapshot
+    assert snap is not None
+    assert "image" in snap.activations
+    assert "x" not in snap.activations
+
+    session.detach()
+    thread.join(timeout=5)
+
+
 def test_snapshot_tensors_are_cpu_and_independent() -> None:
     session, model = _make_session(epochs=1, phases={"train": 1})
 

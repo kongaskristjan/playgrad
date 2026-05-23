@@ -71,11 +71,18 @@ for, and there is no orphan capture without a pause to consume it.
 ## Hook lifecycle, gradient pickup, snapshot copy
 
 When `_should_capture` returns True, `__enter__` calls `_install_hooks()`,
-which registers a forward hook on every submodule (skipping the top-level
-model). The hook stores `output` in `Session._activations` as a live
-reference, *and* calls `output.retain_grad()` on it (when `requires_grad`)
-so that PyTorch will populate `output.grad` after `loss.backward()`. No
-backward hook is needed.
+which registers:
+
+1. A forward **pre-hook** on the root model. It captures each positional
+   tensor input under its parameter name (derived from
+   `inspect.signature(model.forward)`), e.g. `x` for a model whose
+   forward signature is `forward(self, x)`. Inputs are exposed in the
+   snapshot under those names, alongside module outputs.
+2. A forward hook on every submodule (skipping the root model itself).
+   The hook stores `output` in `Session._activations` as a live
+   reference *and* calls `output.retain_grad()` on it (when
+   `requires_grad`) so that PyTorch populates `output.grad` after
+   `loss.backward()`. No backward hook is needed.
 
 At `__exit__`:
 
