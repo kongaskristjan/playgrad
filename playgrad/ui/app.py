@@ -184,14 +184,26 @@ def _build_page(
             architecture_toggle = ui.button(
                 icon="account_tree", color="slate-500"
             ).props("dense size=md").tooltip("Toggle architecture pane")
-            ui.button("Stop", on_click=session.stop, color="red").props("dense size=md")
-            ui.button("Step Batch", on_click=session.step_batch, color="orange").props("dense size=md")
-            ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props("dense size=md")
-            ui.button("Step Until End", on_click=session.step_run, color="orange").props("dense size=md")
-            ui.button("Step Until Custom", on_click=step_until_custom.open, color="orange").props("dense size=md")
-            ui.button("Detach", on_click=session.detach, color="green").props("dense size=md")
+            ui.button("Stop", on_click=session.stop, color="red").props(
+                "dense size=md"
+            ).tooltip("Pause at the next batch boundary")
+            ui.button("Step Batch", on_click=session.step_batch, color="orange").props(
+                "dense size=md"
+            ).tooltip("Advance one batch, then pause")
+            ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props(
+                "dense size=md"
+            ).tooltip("Run until the epoch changes, then pause")
+            ui.button("Step Until End", on_click=session.step_run, color="orange").props(
+                "dense size=md"
+            ).tooltip("Run to the end of training")
+            ui.button(
+                "Step Until Custom", on_click=step_until_custom.open, color="orange"
+            ).props("dense size=md").tooltip("Pick a phase/epoch/batch to pause at")
+            ui.button("Detach", on_click=session.detach, color="green").props(
+                "dense size=md"
+            ).tooltip("Release the training loop and stop capturing snapshots")
             position_label = ui.label("(waiting for first snapshot)").classes("ml-3 font-mono text-sm")
-            ui.label("Sample:").classes("ml-3 text-sm")
+            ui.label("Viewing sample:").classes("ml-3 text-sm")
             sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
             input_toggle = ui.button(
                 icon="image", color="slate-500"
