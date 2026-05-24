@@ -6,8 +6,11 @@ UI. Conv-style activations become a row of square channel tiles; 1D
 activations become a single short heatmap row.
 
 Sequential (grayscale) colormap for activations; diverging (blue-white-red)
-for gradients. PNGs are encoded with `compress_level=1` to favour speed over
-size — bytes travel a local WebSocket, so wire size is irrelevant.
+for gradients. Both colormaps use a symmetric `[-x, +x]` scale where `x` is
+the per-strip absolute maximum; a vertical colorbar with `+x` / `0` / `-x`
+labels is rendered into the left edge of each strip. PNGs are encoded with
+`compress_level=1` to favour speed over size — bytes travel a local
+WebSocket, so wire size is irrelevant.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import io
 from typing import Literal
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from torch import Tensor
 from torch.nn import functional as F
 
@@ -27,6 +30,11 @@ LINEAR_MAX_BINS: int = 256
 LINEAR_BIN_WIDTH: int = 16
 INPUT_IMAGE_SIZE: int = 256
 PNG_COMPRESS_LEVEL: int = 1
+LEGEND_BAR_WIDTH: int = 12
+LEGEND_LABEL_WIDTH: int = 52
+LEGEND_GAP: int = 4
+LEGEND_WIDTH: int = LEGEND_LABEL_WIDTH + LEGEND_GAP + LEGEND_BAR_WIDTH + LEGEND_GAP
+LEGEND_MID_LABEL_MIN_HEIGHT: int = 64
 
 ColormapKind = Literal["activation", "gradient"]
 
@@ -57,15 +65,17 @@ def render_strip(
 
 def _render_chw(tensor: Tensor, *, kind: ColormapKind) -> bytes:
     c, h, w = tensor.shape
+    abs_max = float(tensor.detach().abs().max())
     mode = "nearest" if max(h, w) <= TILE_SIZE else "area"
     resized = F.interpolate(
         tensor.unsqueeze(0).float(),
         size=(TILE_SIZE, TILE_SIZE),
         mode=mode,
     )[0]
-    rgb = _apply_colormap(resized.numpy(), kind=kind)
+    rgb = _apply_colormap(resized.numpy(), kind=kind, abs_max=abs_max)
     strip = _concat_tiles_with_gaps(list(rgb), TILE_GAP)
-    return _encode_png(strip)
+    legend = _render_legend(TILE_SIZE, abs_max=abs_max, kind=kind)
+    return _encode_png(np.concatenate([legend, strip], axis=1))
 
 
 def _concat_tiles_with_gaps(tiles: list[np.ndarray], gap: int) -> np.ndarray:
@@ -123,38 +133,40 @@ def render_image(
 
 def _render_1d(tensor: Tensor, *, kind: ColormapKind) -> bytes:
     values = tensor.float()
+    abs_max = float(values.abs().max())
     f = values.shape[0]
     if f > LINEAR_MAX_BINS:
         values = F.adaptive_avg_pool1d(
             values.view(1, 1, f), LINEAR_MAX_BINS
         ).view(-1)
         f = LINEAR_MAX_BINS
-    rgb_row = _apply_colormap(values.numpy(), kind=kind)
+    rgb_row = _apply_colormap(values.numpy(), kind=kind, abs_max=abs_max)
     image = np.broadcast_to(rgb_row[None, :, :], (LINEAR_TILE_HEIGHT, f, 3)).copy()
-    pil = Image.fromarray(image, mode="RGB").resize(
-        (f * LINEAR_BIN_WIDTH, LINEAR_TILE_HEIGHT), Image.Resampling.NEAREST
+    strip = np.asarray(
+        Image.fromarray(image, mode="RGB").resize(
+            (f * LINEAR_BIN_WIDTH, LINEAR_TILE_HEIGHT), Image.Resampling.NEAREST
+        )
     )
-    return _pil_to_png(pil)
+    legend = _render_legend(LINEAR_TILE_HEIGHT, abs_max=abs_max, kind=kind)
+    return _encode_png(np.concatenate([legend, strip], axis=1))
 
 
-def _apply_colormap(values: np.ndarray, *, kind: ColormapKind) -> np.ndarray:
+def _apply_colormap(
+    values: np.ndarray, *, kind: ColormapKind, abs_max: float
+) -> np.ndarray:
+    scale = max(abs_max, 1e-12)
+    norm = (values / scale).clip(-1.0, 1.0)
     if kind == "activation":
-        return _sequential_colormap(values)
-    return _diverging_colormap(values)
+        return _sequential_colormap(norm)
+    return _diverging_colormap(norm)
 
 
-def _sequential_colormap(values: np.ndarray) -> np.ndarray:
-    lo, hi = float(values.min()), float(values.max())
-    if hi <= lo:
-        gray = np.zeros(values.shape, dtype=np.uint8)
-    else:
-        gray = (((values - lo) / (hi - lo)) * 255).astype(np.uint8)
+def _sequential_colormap(norm: np.ndarray) -> np.ndarray:
+    gray = (((norm + 1.0) * 0.5) * 255).astype(np.uint8)
     return np.stack([gray, gray, gray], axis=-1)
 
 
-def _diverging_colormap(values: np.ndarray) -> np.ndarray:
-    abs_max = float(max(abs(values.min()), abs(values.max()), 1e-12))
-    norm = (values / abs_max).clip(-1.0, 1.0)
+def _diverging_colormap(norm: np.ndarray) -> np.ndarray:
     rgb = np.full(norm.shape + (3,), 255, dtype=np.uint8)
     pos = norm > 0
     neg = norm < 0
@@ -165,6 +177,34 @@ def _diverging_colormap(values: np.ndarray) -> np.ndarray:
     rgb[neg, 0] = fade_neg
     rgb[neg, 1] = fade_neg
     return rgb
+
+
+def _render_legend(
+    height: int, *, abs_max: float, kind: ColormapKind
+) -> np.ndarray:
+    """Vertical colorbar with `+x` / `0` / `-x` labels.
+
+    `+x` sits at the top of the bar, `-x` at the bottom; the middle `0`
+    label is dropped on short strips where it would collide with the
+    top/bottom labels.
+    """
+    values = np.linspace(abs_max, -abs_max, height, dtype=np.float32)
+    bar_col = _apply_colormap(values, kind=kind, abs_max=abs_max)
+    bar = np.broadcast_to(bar_col[:, None, :], (height, LEGEND_BAR_WIDTH, 3)).copy()
+
+    labels_img = Image.new("RGB", (LEGEND_LABEL_WIDTH, height), (255, 255, 255))
+    draw = ImageDraw.Draw(labels_img)
+    font = ImageFont.load_default()
+    x = LEGEND_LABEL_WIDTH - 2
+    color = (0, 0, 0)
+    draw.text((x, 0), f"+{abs_max:.2g}", fill=color, font=font, anchor="ra")
+    draw.text((x, height - 1), f"-{abs_max:.2g}", fill=color, font=font, anchor="rd")
+    if height >= LEGEND_MID_LABEL_MIN_HEIGHT:
+        draw.text((x, height // 2), "0", fill=color, font=font, anchor="rm")
+    labels = np.asarray(labels_img)
+
+    gap = np.full((height, LEGEND_GAP, 3), 255, dtype=np.uint8)
+    return np.concatenate([labels, gap, bar, gap], axis=1)
 
 
 def _encode_png(rgb: np.ndarray) -> bytes:

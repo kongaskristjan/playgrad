@@ -10,6 +10,7 @@ from PIL import Image
 
 from playgrad.ui.render import (
     INPUT_IMAGE_SIZE,
+    LEGEND_WIDTH,
     LINEAR_BIN_WIDTH,
     LINEAR_MAX_BINS,
     LINEAR_TILE_HEIGHT,
@@ -22,7 +23,12 @@ from playgrad.ui.render import (
 
 
 def _chw_strip_width(num_tiles: int) -> int:
-    return num_tiles * TILE_SIZE + max(0, num_tiles - 1) * TILE_GAP
+    tiles = num_tiles * TILE_SIZE + max(0, num_tiles - 1) * TILE_GAP
+    return LEGEND_WIDTH + tiles
+
+
+def _1d_strip_width(num_bins: int) -> int:
+    return LEGEND_WIDTH + num_bins * LINEAR_BIN_WIDTH
 
 
 def _decode(png: bytes) -> Image.Image:
@@ -44,7 +50,7 @@ def test_1d_strip_dimensions(kind: ColormapKind) -> None:
     png = render_strip(tensor, sample_idx=0, kind=kind)
     assert png is not None
     img = _decode(png)
-    assert img.size == (10 * LINEAR_BIN_WIDTH, LINEAR_TILE_HEIGHT)
+    assert img.size == (_1d_strip_width(10), LINEAR_TILE_HEIGHT)
 
 
 def test_1d_strip_caps_at_max_bins() -> None:
@@ -52,7 +58,7 @@ def test_1d_strip_caps_at_max_bins() -> None:
     png = render_strip(tensor, sample_idx=0, kind="activation")
     assert png is not None
     img = _decode(png)
-    assert img.size == (LINEAR_MAX_BINS * LINEAR_BIN_WIDTH, LINEAR_TILE_HEIGHT)
+    assert img.size == (_1d_strip_width(LINEAR_MAX_BINS), LINEAR_TILE_HEIGHT)
 
 
 def test_returns_none_for_none_tensor() -> None:
