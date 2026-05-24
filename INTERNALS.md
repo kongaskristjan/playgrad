@@ -198,16 +198,24 @@ It does not touch tensors directly until they need to be rendered.
   circles for `call_function` / `call_method`, stadiums for
   `placeholder` / `output`).
 - `playgrad.ui.render.render_strip(tensor, sample_idx, kind=...)` is the
-  only function that turns CPU tensors into PNG bytes:
+  function that turns per-layer CPU tensors into PNG bytes:
   - For per-sample shape `[C, H, W]` it interpolates each channel to a
-    `TILE_SIZE × TILE_SIZE` tile and concatenates horizontally; result
-    is a `[TILE_SIZE, C × TILE_SIZE]` PNG.
+    `TILE_SIZE × TILE_SIZE` tile and concatenates horizontally with a
+    `TILE_GAP`-px white spacer between tiles so adjacent dark channels
+    don't smear together.
   - For `[F]` it builds a single short heatmap row, downsampled to at
     most `LINEAR_MAX_BINS` bins when `F` is large.
   - Sequential grayscale colormap for activations, diverging
     blue-white-red for gradients. PNG `compress_level=1` — wire size
     doesn't matter, encode speed does.
   - Other per-sample shapes return `None`; the UI hides those images.
+- `playgrad.ui.render.render_image(tensor, sample_idx, mean=..., std=...)`
+  renders the model input as a natural RGB or grayscale PNG (upscaled to
+  `INPUT_IMAGE_SIZE` with nearest-neighbour). Channels are assumed to lie
+  in `[0, 1]` unless both `mean` and `std` are passed, in which case the
+  sample is denormalized (`x * std + mean`) before being clamped and
+  scaled to 8-bit. Anything other than `C == 1` or `C == 3` returns
+  `None`.
 - `playgrad.ui.app.serve(session, port=..., host=...)` runs the NiceGUI
   app on a background thread. NiceGUI is mounted onto a bare FastAPI
   app via `ui.run_with`, which is then served by `uvicorn.Server` from

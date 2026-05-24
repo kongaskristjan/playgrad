@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import playgrad
-from examples.cifar10.data import build_dataloaders
+from examples.cifar10.data import CIFAR10_MEAN, CIFAR10_STD, build_dataloaders
 from examples.cifar10.resnet import ResNetCIFAR
 from examples.cifar10.train import evaluate, train_one_epoch
 
@@ -89,7 +89,12 @@ def main() -> None:
             epochs=args.epochs,
             phases={"train": len(train_loader), "val": len(test_loader)},
         )
-        playgrad.serve(session, port=args.playgrad_port)
+        playgrad.serve(
+            session,
+            port=args.playgrad_port,
+            input_mean=CIFAR10_MEAN,
+            input_std=CIFAR10_STD,
+        )
         print(f"playgrad UI at http://127.0.0.1:{args.playgrad_port}")
 
     best_acc = 0.0

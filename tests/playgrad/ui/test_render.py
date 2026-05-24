@@ -9,12 +9,14 @@ import torch
 from PIL import Image
 
 from playgrad.ui.render import (
+    INPUT_IMAGE_SIZE,
     LINEAR_BIN_WIDTH,
     LINEAR_MAX_BINS,
     LINEAR_TILE_HEIGHT,
     TILE_GAP,
     TILE_SIZE,
     ColormapKind,
+    render_image,
     render_strip,
 )
 
@@ -82,3 +84,61 @@ def test_gradient_zero_center_renders() -> None:
     tensor = torch.zeros(2, 4, 8, 8)
     png = render_strip(tensor, sample_idx=0, kind="gradient")
     assert png is not None
+
+
+@pytest.mark.parametrize("channels", [1, 3])
+def test_input_image_dimensions(channels: int) -> None:
+    tensor = torch.rand(2, channels, 16, 16)
+    png = render_image(tensor, sample_idx=0)
+    assert png is not None
+    img = _decode(png)
+    assert img.size == (INPUT_IMAGE_SIZE, INPUT_IMAGE_SIZE)
+
+
+def _rgb_at(img: Image.Image, x: int, y: int) -> tuple[int, int, int]:
+    pixel = img.getpixel((x, y))
+    assert isinstance(pixel, tuple) and len(pixel) == 3
+    r, g, b = pixel
+    return int(r), int(g), int(b)
+
+
+def test_input_image_denormalizes_with_mean_std() -> None:
+    # Tensor is `(value - mean) / std`; after denorm it should hit 0.5 ->
+    # mid-gray (128) for every channel.
+    mean = (0.5, 0.4, 0.6)
+    std = (0.1, 0.2, 0.3)
+    chans = [torch.full((4, 4), (0.5 - m) / s) for m, s in zip(mean, std, strict=True)]
+    tensor = torch.stack(chans)[None]
+    png = render_image(tensor, sample_idx=0, mean=mean, std=std)
+    assert png is not None
+    r, g, b = _rgb_at(_decode(png), 0, 0)
+    assert abs(r - 128) <= 1
+    assert abs(g - 128) <= 1
+    assert abs(b - 128) <= 1
+
+
+def test_input_image_default_assumes_unit_range() -> None:
+    # An all-1.0 image should render as pure white without normalization.
+    tensor = torch.ones(1, 3, 4, 4)
+    png = render_image(tensor, sample_idx=0)
+    assert png is not None
+    assert _rgb_at(_decode(png), 0, 0) == (255, 255, 255)
+
+
+def test_input_image_returns_none_for_unsupported_channels() -> None:
+    tensor = torch.rand(1, 4, 8, 8)
+    assert render_image(tensor, sample_idx=0) is None
+
+
+def test_input_image_returns_none_for_unsupported_shape() -> None:
+    assert render_image(torch.rand(3, 8, 8), sample_idx=0) is None
+
+
+def test_input_image_returns_none_for_out_of_range_sample() -> None:
+    tensor = torch.rand(2, 3, 8, 8)
+    assert render_image(tensor, sample_idx=5) is None
+
+
+def test_input_image_returns_none_when_mean_std_size_mismatched() -> None:
+    tensor = torch.rand(1, 3, 8, 8)
+    assert render_image(tensor, sample_idx=0, mean=(0.5,), std=(0.2,)) is None

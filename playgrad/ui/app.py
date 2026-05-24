@@ -32,7 +32,7 @@ from torch import Tensor
 from playgrad.schedule import Schedule
 from playgrad.session import BatchSnapshot, Session
 from playgrad.ui.graph import build_mermaid
-from playgrad.ui.render import render_strip
+from playgrad.ui.render import render_image, render_strip
 
 
 def serve(
@@ -41,6 +41,8 @@ def serve(
     port: int = 8080,
     host: str = "127.0.0.1",
     log_level: str = "warning",
+    input_mean: tuple[float, ...] | None = None,
+    input_std: tuple[float, ...] | None = None,
 ) -> threading.Thread:
     """Start the NiceGUI app on a background thread and return that thread.
 
@@ -48,15 +50,27 @@ def serve(
     then served by uvicorn from a non-main thread, with signal handlers
     disabled so uvicorn doesn't try to wire SIGINT/SIGTERM from a thread
     that isn't the main one.
+
+    `input_mean` / `input_std` are passed to the input-image pane so the
+    sample is denormalized (`x * std + mean`) before display. When either
+    is `None`, the renderer assumes the input is already in `[0, 1]`.
     """
     mermaid_src = build_mermaid(session.model)
     layer_names = session.layer_names
+    input_name = session.input_names[0] if session.input_names else None
 
     fastapi_app = FastAPI()
 
     @ui.page("/")
     def index() -> None:
-        _build_page(session, mermaid_src, layer_names)
+        _build_page(
+            session,
+            mermaid_src,
+            layer_names,
+            input_name=input_name,
+            input_mean=input_mean,
+            input_std=input_std,
+        )
 
     ui.run_with(fastapi_app, storage_secret="playgrad")
 
@@ -87,6 +101,10 @@ def _build_page(
     session: Session,
     mermaid_src: str,
     layer_names: list[str],
+    *,
+    input_name: str | None,
+    input_mean: tuple[float, ...] | None,
+    input_std: tuple[float, ...] | None,
 ) -> None:
     state = _PageState()
     layer_views: dict[str, _LayerView] = {}
@@ -114,6 +132,11 @@ def _build_page(
             position_label = ui.label("(waiting for first snapshot)").classes("ml-3 font-mono text-sm")
             ui.label("Sample:").classes("ml-3 text-sm")
             sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
+            input_toggle = ui.button(
+                icon="image", color="slate-500"
+            ).classes("ml-auto").props("dense size=md").tooltip(
+                "Toggle input image pane"
+            )
 
             def _defer_clamp_display(target: int) -> None:
                 # NiceGUI suppresses .value writes made from inside a value-change
@@ -147,11 +170,22 @@ def _build_page(
             ):
                 for name in layer_names:
                     layer_views[name] = _LayerView(name)
+            input_pane = ui.column().classes(
+                "w-72 shrink-0 h-full overflow-auto p-3 "
+                "border-l-2 border-slate-300 bg-slate-50 items-center"
+            )
+            with input_pane:
+                ui.label("Input").classes("font-mono text-sm self-start")
+                input_html = ui.html("")
 
         def toggle_architecture() -> None:
             architecture_pane.set_visibility(not architecture_pane.visible)
 
+        def toggle_input() -> None:
+            input_pane.set_visibility(not input_pane.visible)
+
         architecture_toggle.on_click(toggle_architecture)
+        input_toggle.on_click(toggle_input)
 
     async def tick() -> None:
         snap = session.snapshot
@@ -168,12 +202,19 @@ def _build_page(
             state.rendering = True
             try:
                 sample_idx = state.sample_idx
-                rendered = await asyncio.to_thread(
-                    _compute_all, layer_views, snap, sample_idx
+                rendered, input_img = await asyncio.to_thread(
+                    _compute_frame,
+                    layer_views,
+                    snap,
+                    sample_idx,
+                    input_name=input_name,
+                    input_mean=input_mean,
+                    input_std=input_std,
                 )
             finally:
                 state.rendering = False
             _apply_all(layer_views, rendered)
+            input_html.set_content(input_img)
 
     ui.timer(0.2, tick)
 
@@ -282,12 +323,16 @@ def _sync_spinner_max(
         state.dirty = True
 
 
-def _compute_all(
+def _compute_frame(
     views: dict[str, _LayerView],
     snap: BatchSnapshot,
     sample_idx: int,
-) -> dict[str, tuple[str, str]]:
-    return {
+    *,
+    input_name: str | None,
+    input_mean: tuple[float, ...] | None,
+    input_std: tuple[float, ...] | None,
+) -> tuple[dict[str, tuple[str, str]], str]:
+    rendered = {
         name: view.compute(
             snap.activations.get(name),
             snap.activation_gradients.get(name),
@@ -295,6 +340,11 @@ def _compute_all(
         )
         for name, view in views.items()
     }
+    input_tensor = snap.activations.get(input_name) if input_name else None
+    input_png = render_image(
+        input_tensor, sample_idx, mean=input_mean, std=input_std
+    )
+    return rendered, _img_tag(input_png)
 
 
 def _apply_all(

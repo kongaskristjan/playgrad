@@ -66,7 +66,13 @@ He et al. 2016) with ResNet-D-style downsampling shortcuts (He et al. 2018):
 import playgrad
 
 session = playgrad.start(model, epochs=50, phases={"train": 196, "val": 40})
-playgrad.serve(session, port=8080)
+playgrad.serve(
+    session,
+    port=8080,
+    # Optional: denormalize input images for display (e.g., CIFAR10 stats).
+    input_mean=(0.4914, 0.4822, 0.4465),
+    input_std=(0.2470, 0.2435, 0.2616),
+)
 
 for epoch in range(50):
     for batch in train_loader:
@@ -86,10 +92,13 @@ Open `http://localhost:8080` while training is running. The top bar drives
 the session with five "go" buttons — `stop`, `step batch`, `step epoch`,
 `step until end`, `step until custom` (opens a dialog where you pick the
 target phase / epoch / batch) — and `detach` (run unattended without
-further pauses). The leading icon button toggles the architecture pane.
-The left pane shows the module hierarchy as a Mermaid diagram; the right
-pane shows one card per submodule with horizontally-scrollable activation
-and activation-gradient strips for the selected sample.
+further pauses). The leading icon button toggles the architecture pane;
+a trailing icon button toggles the input-image pane. The left pane shows
+the module hierarchy as a Mermaid diagram; the centre pane shows one card
+per submodule with horizontally-scrollable activation and
+activation-gradient strips for the selected sample; the right pane shows
+the input image for that sample (RGB or grayscale), denormalized with the
+`input_mean` / `input_std` passed to `serve()` if any.
 
 See `INTERNALS.md` for the architecture overview.
 
