@@ -50,20 +50,43 @@ _ARCHITECTURE_CLICK_CSS: str = """
 """
 
 # Mermaid SVG node ids look like "<element>-flowchart-<slug>-<counter>"; the
-# matching layer card carries `data-layer="<slug>"` so the click handlers
-# can cross-navigate. Clicking a Mermaid node scrolls + flashes the layer
-# card; clicking a card header scrolls + flashes the Mermaid node. We
-# compute scroll position directly instead of using `scrollIntoView`,
-# because the latter leaves the target several dozen pixels below the
-# column's top edge here (the previous item's tail stays visible), even
-# with `block: 'start'`.
+# matching layer card carries `data-layer="<slug>"` so we can cross-link
+# the two. Hovering either side adds `.playgrad-highlight` to both ends
+# of the pair; clicking either side scrolls the *other* pane so the
+# matching element lands at the top. Scroll positions are computed
+# directly instead of via `scrollIntoView`, because the latter leaves the
+# target several dozen pixels below the column's top edge here (the
+# previous item's tail stays visible), even with `block: 'start'`.
 _ARCHITECTURE_CLICK_JS: str = """
 <script>
 (function() {
-  const HIGHLIGHT_MS = 1500;
   function slugFromMermaidId(id) {
     const m = /-flowchart-(.+)-\\d+$/.exec(id || '');
     return m ? m[1] : null;
+  }
+  function findMermaidNode(slug) {
+    return document.querySelector(
+      'g.node[id*="-flowchart-' + slug.replace(/"/g, '') + '-"]'
+    );
+  }
+  function matchPair(el) {
+    if (!el || !el.closest) return null;
+    const node = el.closest('g.node');
+    if (node) {
+      const slug = slugFromMermaidId(node.id);
+      if (!slug) return null;
+      const card = document.querySelector('[data-layer="' + slug + '"]');
+      if (!card) return null;
+      return { node: node, card: card };
+    }
+    const card = el.closest('[data-layer]');
+    if (card) {
+      const slug = card.getAttribute('data-layer');
+      const node = findMermaidNode(slug);
+      if (!node) return null;
+      return { node: node, card: card };
+    }
+    return null;
   }
   function scrollableParent(el) {
     let p = el.parentElement;
@@ -86,18 +109,27 @@ _ARCHITECTURE_CLICK_JS: str = """
       behavior: 'smooth',
     });
   }
-  function flashHighlight(el) {
-    el.classList.add('playgrad-highlight');
-    setTimeout(function() {
-      el.classList.remove('playgrad-highlight');
-    }, HIGHLIGHT_MS);
+
+  let highlighted = null;
+  function setHighlight(pair) {
+    if (highlighted && pair && highlighted.node === pair.node) return;
+    if (highlighted) {
+      highlighted.node.classList.remove('playgrad-highlight');
+      highlighted.card.classList.remove('playgrad-highlight');
+    }
+    highlighted = pair;
+    if (pair) {
+      pair.node.classList.add('playgrad-highlight');
+      pair.card.classList.add('playgrad-highlight');
+    }
   }
-  function findMermaidNode(slug) {
-    // Escape the slug because Mermaid only uses [A-Za-z0-9_], but be defensive.
-    return document.querySelector(
-      'g.node[id*="-flowchart-' + slug.replace(/"/g, '') + '-"]'
-    );
-  }
+  document.addEventListener('mouseover', function(e) {
+    setHighlight(matchPair(e.target));
+  });
+  document.addEventListener('mouseleave', function() {
+    setHighlight(null);
+  });
+
   document.addEventListener('click', function(e) {
     if (!e.target.closest) return;
     const node = e.target.closest('g.node');
@@ -107,7 +139,6 @@ _ARCHITECTURE_CLICK_JS: str = """
       const card = document.querySelector('[data-layer="' + slug + '"]');
       if (!card) return;
       scrollTargetToTop(card);
-      flashHighlight(card);
       return;
     }
     const card = e.target.closest('[data-layer]');
@@ -120,7 +151,6 @@ _ARCHITECTURE_CLICK_JS: str = """
     const mNode = findMermaidNode(slug);
     if (!mNode) return;
     scrollTargetToTop(mNode);
-    flashHighlight(mNode);
   });
 })();
 </script>
