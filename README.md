@@ -82,10 +82,10 @@ Open `http://localhost:8080` while training is running. The top bar drives
 the session with five "go" buttons — `stop`, `step batch`, `step epoch`,
 `step until end`, `step until custom` (opens a dialog where you pick the
 target phase / epoch / batch) — and `detach` (run unattended without
-further pauses). The left pane shows the module hierarchy as a Mermaid
-diagram; the right pane shows one card per submodule with
-horizontally-scrollable activation and activation-gradient strips for
-the selected sample.
+further pauses). The leading icon button toggles the architecture pane.
+The left pane shows the module hierarchy as a Mermaid diagram; the right
+pane shows one card per submodule with horizontally-scrollable activation
+and activation-gradient strips for the selected sample.
 
 See `INTERNALS.md` for the architecture overview.
 

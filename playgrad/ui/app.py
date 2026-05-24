@@ -102,6 +102,9 @@ def _build_page(
             "w-full items-center gap-x-3 gap-y-0 px-3 py-2 shrink-0 "
             "border-b-2 border-slate-300 bg-slate-100 shadow-sm z-10"
         ):
+            architecture_toggle = ui.button(
+                icon="account_tree", color="slate-500"
+            ).props("dense size=md").tooltip("Toggle architecture pane")
             ui.button("Stop", on_click=session.stop, color="red").props("dense size=md")
             ui.button("Step Batch", on_click=session.step_batch, color="orange").props("dense size=md")
             ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props("dense size=md")
@@ -133,13 +136,22 @@ def _build_page(
             sample_input.on_value_change(on_sample_change)
 
         with ui.row().classes("w-full no-wrap gap-0 grow min-h-0"):
-            with ui.column().classes(
-                "w-1/4 h-full overflow-auto p-2 border-r-2 border-slate-300 bg-slate-50"
-            ):
+            architecture_pane = ui.column().classes(
+                "w-1/4 shrink-0 h-full overflow-auto p-2 "
+                "border-r-2 border-slate-300 bg-slate-50"
+            )
+            with architecture_pane:
                 ui.mermaid(mermaid_src).classes("w-full")
-            with ui.column().classes("w-3/4 h-full overflow-auto p-3 bg-slate-200 gap-3"):
+            with ui.column().classes(
+                "grow min-w-0 h-full overflow-auto p-3 bg-slate-200 gap-3"
+            ):
                 for name in layer_names:
                     layer_views[name] = _LayerView(name)
+
+        def toggle_architecture() -> None:
+            architecture_pane.set_visibility(not architecture_pane.visible)
+
+        architecture_toggle.on_click(toggle_architecture)
 
     async def tick() -> None:
         snap = session.snapshot
