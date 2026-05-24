@@ -23,6 +23,7 @@ import asyncio
 import base64
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -182,8 +183,9 @@ def serve(
     input_name = session.input_names[0] if session.input_names else None
 
     fastapi_app = FastAPI()
+    favicon_path = Path(__file__).resolve().parents[2] / "assets" / "logo_small.png"
 
-    @ui.page("/")
+    @ui.page("/", favicon=str(favicon_path))
     def index() -> None:
         _build_page(
             session,
@@ -231,6 +233,7 @@ def _build_page(
     state = _PageState()
     layer_views: dict[str, _LayerView] = {}
 
+    ui.page_title("PlayGrad")
     ui.query(".nicegui-content").classes("p-0 h-screen overflow-hidden")
     ui.query("body").classes("overflow-hidden")
     ui.query("html").classes("overflow-hidden")
