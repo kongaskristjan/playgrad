@@ -78,6 +78,7 @@ class _PageState:
     last_snapshot: BatchSnapshot | None = None
     dirty: bool = False
     rendering: bool = False
+    spinner_max: int | None = None
 
 
 def _build_page(
@@ -99,9 +100,22 @@ def _build_page(
         ui.label("Sample:").classes("ml-4")
         sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20")
 
+        def _defer_clamp_display(target: int) -> None:
+            # NiceGUI suppresses .value writes made from inside a value-change
+            # handler; schedule the display correction for the next event loop
+            # iteration so it actually reaches the client.
+            ui.timer(0.0, lambda: sample_input.set_value(target), once=True)
+
         def on_sample_change(e: object) -> None:
             value = getattr(e, "value", None)
-            state.sample_idx = int(value) if value is not None else 0
+            idx = int(value) if value is not None else 0
+            if idx < 0:
+                idx = 0
+                _defer_clamp_display(idx)
+            elif state.spinner_max is not None and idx > state.spinner_max:
+                idx = state.spinner_max
+                _defer_clamp_display(idx)
+            state.sample_idx = idx
             state.dirty = True
 
         sample_input.on_value_change(on_sample_change)
@@ -119,6 +133,7 @@ def _build_page(
             return
         pos = snap.position
         position_label.text = f"epoch {pos.epoch} | {pos.phase} batch {pos.batch_idx}"
+        _sync_spinner_max(snap, state, sample_input)
         if state.rendering:
             return
         if snap is not state.last_snapshot or state.dirty:
@@ -135,6 +150,32 @@ def _build_page(
             _apply_all(layer_views, rendered)
 
     ui.timer(0.2, tick)
+
+
+def _snapshot_batch_size(snap: BatchSnapshot) -> int | None:
+    for tensor in snap.activations.values():
+        if tensor.ndim > 0:
+            return int(tensor.shape[0])
+    return None
+
+
+def _sync_spinner_max(
+    snap: BatchSnapshot,
+    state: _PageState,
+    sample_input: ui.number,
+) -> None:
+    batch_size = _snapshot_batch_size(snap)
+    if batch_size is None or batch_size <= 0:
+        return
+    new_max = batch_size - 1
+    if state.spinner_max == new_max:
+        return
+    state.spinner_max = new_max
+    sample_input.props(f"max={new_max}")
+    if state.sample_idx > new_max:
+        state.sample_idx = new_max
+        sample_input.value = new_max
+        state.dirty = True
 
 
 def _compute_all(
