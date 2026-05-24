@@ -7,9 +7,10 @@ disabled so it survives being started from a non-main thread). Layout:
   index spinner.
 - Left pane: the model architecture as a Mermaid diagram (built once at
   start).
-- Right pane: one card per submodule. Each card holds two horizontally
-  scrollable strips — activations on top, activation gradients below —
-  sharing a single horizontal scrollbar so they pan together.
+- Right pane: a one-column table with one row per submodule. Each row
+  holds two horizontally scrollable strips — activations on top,
+  activation gradients below — sharing a single horizontal scrollbar so
+  they pan together.
 
 A `ui.timer` in each connection polls `session.snapshot`; when a new
 snapshot is published, the page re-renders all per-layer strips against
@@ -130,9 +131,11 @@ def _build_page(
     with ui.row().classes("w-full no-wrap gap-0").style("height: calc(100vh - 40px)"):
         with ui.column().classes("w-1/4 h-full overflow-auto p-1"):
             ui.mermaid(mermaid_src).classes("w-full")
-        with ui.column().classes("w-3/4 h-full overflow-auto p-1 gap-2"):
-            for name in layer_names:
-                layer_views[name] = _LayerView(name)
+        with ui.column().classes("w-3/4 h-full overflow-auto p-1"):
+            with ui.element("table").classes("w-full").style("table-layout: fixed"):
+                with ui.element("tbody"):
+                    for name in layer_names:
+                        layer_views[name] = _LayerView(name)
 
     async def tick() -> None:
         snap = session.snapshot
@@ -287,22 +290,27 @@ def _apply_all(
 
 
 class _LayerView:
-    """One card per submodule, with activation + activation-gradient strips.
+    """One table row per submodule, with activation + activation-gradient strips.
 
     The strips are raw `<img>` elements with `max-width: none`, so each PNG
     renders at its natural pixel width and the wrapping `overflow-x-auto`
-    div produces a shared horizontal scrollbar. NiceGUI's `ui.image` uses
-    Quasar's responsive q-img instead, which squishes the strip to the
-    card width — not what we want here.
+    div produces a shared horizontal scrollbar inside the cell. NiceGUI's
+    `ui.image` uses Quasar's responsive q-img instead, which squishes the
+    strip to the cell width — not what we want here. The enclosing
+    `<table>` uses `table-layout: fixed` so a wide strip doesn't blow out
+    the cell.
     """
 
     def __init__(self, name: str) -> None:
         self.name = name
-        with ui.card().classes("w-full p-2 gap-1"):
-            ui.label(name).classes("font-mono text-sm")
-            with ui.element("div").classes("w-full overflow-x-auto"):
-                self.act_html = ui.html("")
-                self.grad_html = ui.html("")
+        with ui.element("tr").classes(
+            "odd:bg-gray-100 even:bg-white hover:bg-blue-50"
+        ):
+            with ui.element("td").classes("p-2 align-top"):
+                ui.label(name).classes("font-mono text-sm")
+                with ui.element("div").classes("w-full overflow-x-auto"):
+                    self.act_html = ui.html("")
+                    self.grad_html = ui.html("")
 
     def compute(
         self, activation: Tensor | None, gradient: Tensor | None, sample_idx: int
