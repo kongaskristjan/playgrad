@@ -316,7 +316,7 @@ def _sync_spinner_max(
     if state.spinner_max == new_max:
         return
     state.spinner_max = new_max
-    sample_input.props(f"max={new_max}")
+    sample_input.max = new_max
     if state.sample_idx > new_max:
         state.sample_idx = new_max
         sample_input.value = new_max
