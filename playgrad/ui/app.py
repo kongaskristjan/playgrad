@@ -45,13 +45,28 @@ _ARCHITECTURE_CLICK_CSS: str = """
 
 # Mermaid SVG node ids look like "<element>-flowchart-<slug>-<counter>"; the
 # matching layer card carries `data-layer="<slug>"` so the click handler can
-# scroll it into view inside its (overflow-auto) parent column.
+# scroll it into view inside its (overflow-auto) parent column. We compute
+# the scroll position directly instead of using `scrollIntoView`, because
+# the latter leaves the card several dozen pixels below the column's top
+# edge here (the previous card's tail stays visible), even with
+# `block: 'start'`.
 _ARCHITECTURE_CLICK_JS: str = """
 <script>
 (function() {
   function slugFromMermaidId(id) {
     const m = /-flowchart-(.+)-\\d+$/.exec(id || '');
     return m ? m[1] : null;
+  }
+  function scrollableParent(el) {
+    let p = el.parentElement;
+    while (p) {
+      const oy = getComputedStyle(p).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight) {
+        return p;
+      }
+      p = p.parentElement;
+    }
+    return null;
   }
   document.addEventListener('click', function(e) {
     const node = e.target.closest && e.target.closest('g.node');
@@ -60,7 +75,15 @@ _ARCHITECTURE_CLICK_JS: str = """
     if (!slug) return;
     const target = document.querySelector('[data-layer="' + slug + '"]');
     if (!target) return;
-    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const container = scrollableParent(target);
+    if (container) {
+      const cRect = container.getBoundingClientRect();
+      const tRect = target.getBoundingClientRect();
+      container.scrollTo({
+        top: container.scrollTop + (tRect.top - cRect.top),
+        behavior: 'smooth',
+      });
+    }
     target.classList.add('playgrad-highlight');
     setTimeout(function() {
       target.classList.remove('playgrad-highlight');
