@@ -91,51 +91,55 @@ def _build_page(
     state = _PageState()
     layer_views: dict[str, _LayerView] = {}
 
-    ui.query(".nicegui-content").classes("p-0")
+    ui.query(".nicegui-content").classes("p-0 h-screen overflow-hidden")
+    ui.query("body").classes("overflow-hidden")
+    ui.query("html").classes("overflow-hidden")
 
     step_until_custom = _build_step_until_custom_dialog(session)
 
-    with ui.row().classes(
-        "w-full items-center gap-x-3 gap-y-0 p-1 border-b bg-white sticky top-0 z-10"
-    ):
-        ui.button("Stop", on_click=session.stop, color="red").props("dense size=md")
-        ui.button("Step Batch", on_click=session.step_batch, color="orange").props("dense size=md")
-        ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props("dense size=md")
-        ui.button("Step Until End", on_click=session.step_run, color="orange").props("dense size=md")
-        ui.button("Step Until Custom", on_click=step_until_custom.open, color="orange").props("dense size=md")
-        ui.button("Detach", on_click=session.detach, color="green").props("dense size=md")
-        position_label = ui.label("(waiting for first snapshot)").classes("ml-3 font-mono text-sm")
-        ui.label("Sample:").classes("ml-3 text-sm")
-        sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
+    with ui.column().classes("w-full h-screen no-wrap gap-0"):
+        with ui.row().classes(
+            "w-full items-center gap-x-3 gap-y-0 px-3 py-2 shrink-0 "
+            "border-b-2 border-slate-300 bg-slate-100 shadow-sm z-10"
+        ):
+            ui.button("Stop", on_click=session.stop, color="red").props("dense size=md")
+            ui.button("Step Batch", on_click=session.step_batch, color="orange").props("dense size=md")
+            ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props("dense size=md")
+            ui.button("Step Until End", on_click=session.step_run, color="orange").props("dense size=md")
+            ui.button("Step Until Custom", on_click=step_until_custom.open, color="orange").props("dense size=md")
+            ui.button("Detach", on_click=session.detach, color="green").props("dense size=md")
+            position_label = ui.label("(waiting for first snapshot)").classes("ml-3 font-mono text-sm")
+            ui.label("Sample:").classes("ml-3 text-sm")
+            sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
 
-        def _defer_clamp_display(target: int) -> None:
-            # NiceGUI suppresses .value writes made from inside a value-change
-            # handler; schedule the display correction for the next event loop
-            # iteration so it actually reaches the client.
-            ui.timer(0.0, lambda: sample_input.set_value(target), once=True)
+            def _defer_clamp_display(target: int) -> None:
+                # NiceGUI suppresses .value writes made from inside a value-change
+                # handler; schedule the display correction for the next event loop
+                # iteration so it actually reaches the client.
+                ui.timer(0.0, lambda: sample_input.set_value(target), once=True)
 
-        def on_sample_change(e: object) -> None:
-            value = getattr(e, "value", None)
-            idx = int(value) if value is not None else 0
-            if idx < 0:
-                idx = 0
-                _defer_clamp_display(idx)
-            elif state.spinner_max is not None and idx > state.spinner_max:
-                idx = state.spinner_max
-                _defer_clamp_display(idx)
-            state.sample_idx = idx
-            state.dirty = True
+            def on_sample_change(e: object) -> None:
+                value = getattr(e, "value", None)
+                idx = int(value) if value is not None else 0
+                if idx < 0:
+                    idx = 0
+                    _defer_clamp_display(idx)
+                elif state.spinner_max is not None and idx > state.spinner_max:
+                    idx = state.spinner_max
+                    _defer_clamp_display(idx)
+                state.sample_idx = idx
+                state.dirty = True
 
-        sample_input.on_value_change(on_sample_change)
+            sample_input.on_value_change(on_sample_change)
 
-    with ui.row().classes("w-full no-wrap gap-0").style("height: calc(100vh - 40px)"):
-        with ui.column().classes("w-1/4 h-full overflow-auto p-1"):
-            ui.mermaid(mermaid_src).classes("w-full")
-        with ui.column().classes("w-3/4 h-full overflow-auto p-1"):
-            with ui.element("table").classes("w-full").style("table-layout: fixed"):
-                with ui.element("tbody"):
-                    for name in layer_names:
-                        layer_views[name] = _LayerView(name)
+        with ui.row().classes("w-full no-wrap gap-0 grow min-h-0"):
+            with ui.column().classes(
+                "w-1/4 h-full overflow-auto p-2 border-r-2 border-slate-300 bg-slate-50"
+            ):
+                ui.mermaid(mermaid_src).classes("w-full")
+            with ui.column().classes("w-3/4 h-full overflow-auto p-3 bg-slate-200 gap-3"):
+                for name in layer_names:
+                    layer_views[name] = _LayerView(name)
 
     async def tick() -> None:
         snap = session.snapshot
@@ -290,27 +294,30 @@ def _apply_all(
 
 
 class _LayerView:
-    """One table row per submodule, with activation + activation-gradient strips.
+    """One card per submodule, with activation + activation-gradient strips.
 
     The strips are raw `<img>` elements with `max-width: none`, so each PNG
     renders at its natural pixel width and the wrapping `overflow-x-auto`
-    div produces a shared horizontal scrollbar inside the cell. NiceGUI's
+    div produces a shared horizontal scrollbar inside the card. NiceGUI's
     `ui.image` uses Quasar's responsive q-img instead, which squishes the
-    strip to the cell width — not what we want here. The enclosing
-    `<table>` uses `table-layout: fixed` so a wide strip doesn't blow out
-    the cell.
+    strip to the card width — not what we want here. The card has
+    `min-w-0` so a wide strip doesn't push the column wider.
     """
 
     def __init__(self, name: str) -> None:
         self.name = name
-        with ui.element("tr").classes(
-            "odd:bg-gray-100 even:bg-white hover:bg-blue-50"
+        with ui.element("div").classes(
+            "w-full min-w-0 bg-white rounded border border-slate-300 shadow-sm "
+            "hover:border-blue-400"
         ):
-            with ui.element("td").classes("p-2 align-top"):
-                ui.label(name).classes("font-mono text-sm")
-                with ui.element("div").classes("w-full overflow-x-auto"):
-                    self.act_html = ui.html("")
-                    self.grad_html = ui.html("")
+            ui.label(name).classes(
+                "block px-3 py-1 font-mono text-sm bg-slate-100 "
+                "border-b border-slate-300 rounded-t"
+            )
+            with ui.element("div").classes("w-full overflow-x-auto p-2"):
+                self.act_html = ui.html("")
+                ui.element("div").classes("h-1")
+                self.grad_html = ui.html("")
 
     def compute(
         self, activation: Tensor | None, gradient: Tensor | None, sample_idx: int

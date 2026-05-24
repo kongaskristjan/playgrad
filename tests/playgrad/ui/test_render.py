@@ -12,10 +12,15 @@ from playgrad.ui.render import (
     LINEAR_BIN_WIDTH,
     LINEAR_MAX_BINS,
     LINEAR_TILE_HEIGHT,
+    TILE_GAP,
     TILE_SIZE,
     ColormapKind,
     render_strip,
 )
+
+
+def _chw_strip_width(num_tiles: int) -> int:
+    return num_tiles * TILE_SIZE + max(0, num_tiles - 1) * TILE_GAP
 
 
 def _decode(png: bytes) -> Image.Image:
@@ -28,7 +33,7 @@ def test_chw_strip_dimensions(kind: ColormapKind) -> None:
     png = render_strip(tensor, sample_idx=2, kind=kind)
     assert png is not None
     img = _decode(png)
-    assert img.size == (8 * TILE_SIZE, TILE_SIZE)
+    assert img.size == (_chw_strip_width(8), TILE_SIZE)
 
 
 @pytest.mark.parametrize("kind", ["activation", "gradient"])
@@ -69,7 +74,7 @@ def test_zero_variance_tensor_renders() -> None:
     png = render_strip(tensor, sample_idx=0, kind="activation")
     assert png is not None
     img = _decode(png)
-    assert img.size == (4 * TILE_SIZE, TILE_SIZE)
+    assert img.size == (_chw_strip_width(4), TILE_SIZE)
 
 
 def test_gradient_zero_center_renders() -> None:

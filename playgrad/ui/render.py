@@ -21,6 +21,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 TILE_SIZE: int = 128
+TILE_GAP: int = 2
 LINEAR_TILE_HEIGHT: int = 32
 LINEAR_MAX_BINS: int = 256
 LINEAR_BIN_WIDTH: int = 16
@@ -62,8 +63,21 @@ def _render_chw(tensor: Tensor, *, kind: ColormapKind) -> bytes:
         mode=mode,
     )[0]
     rgb = _apply_colormap(resized.numpy(), kind=kind)
-    strip = np.concatenate(list(rgb), axis=1)
+    strip = _concat_tiles_with_gaps(list(rgb), TILE_GAP)
     return _encode_png(strip)
+
+
+def _concat_tiles_with_gaps(tiles: list[np.ndarray], gap: int) -> np.ndarray:
+    if gap <= 0 or len(tiles) <= 1:
+        return np.concatenate(tiles, axis=1)
+    h = tiles[0].shape[0]
+    spacer = np.full((h, gap, 3), 255, dtype=np.uint8)
+    pieces: list[np.ndarray] = []
+    for i, tile in enumerate(tiles):
+        if i > 0:
+            pieces.append(spacer)
+        pieces.append(tile)
+    return np.concatenate(pieces, axis=1)
 
 
 def _render_1d(tensor: Tensor, *, kind: ColormapKind) -> bytes:
