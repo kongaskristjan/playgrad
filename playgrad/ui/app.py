@@ -301,11 +301,22 @@ def _build_page(
             )
             with architecture_pane:
                 ui.mermaid(mermaid_src).classes("w-full")
+                # Tail spacer so the last Mermaid node can still be scrolled to
+                # the top of the pane; without it the pane bottoms out before
+                # the click target reaches the visible top edge.
+                ui.element("div").classes("w-full shrink-0").style(
+                    "min-height: 100%"
+                )
             with ui.column().classes(
                 "grow min-w-0 h-full overflow-auto p-3 bg-slate-200 gap-3"
             ):
                 for name in layer_names:
                     layer_views[name] = _LayerView(name)
+                # Same tail spacer for the centre column, so the last layer
+                # card can also be scrolled to the top.
+                ui.element("div").classes("w-full shrink-0").style(
+                    "min-height: 100%"
+                )
             input_pane = ui.column().classes(
                 "w-72 shrink-0 h-full overflow-auto p-3 "
                 "border-l-2 border-slate-300 bg-slate-50 items-center"
