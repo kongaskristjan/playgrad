@@ -18,6 +18,7 @@ it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import threading
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 import uvicorn
 from fastapi import FastAPI
 from nicegui import ui
+from torch import Tensor
 
 from playgrad.session import BatchSnapshot, Session
 from playgrad.ui.graph import build_mermaid
@@ -75,6 +77,7 @@ class _PageState:
     sample_idx: int = 0
     last_snapshot: BatchSnapshot | None = None
     dirty: bool = False
+    rendering: bool = False
 
 
 def _build_page(
@@ -110,31 +113,51 @@ def _build_page(
             for name in layer_names:
                 layer_views[name] = _LayerView(name)
 
-    def tick() -> None:
+    async def tick() -> None:
         snap = session.snapshot
         if snap is None:
             return
         pos = snap.position
         position_label.text = f"epoch {pos.epoch} | {pos.phase} batch {pos.batch_idx}"
+        if state.rendering:
+            return
         if snap is not state.last_snapshot or state.dirty:
             state.last_snapshot = snap
             state.dirty = False
-            _render_all(state, layer_views, snap)
+            state.rendering = True
+            try:
+                sample_idx = state.sample_idx
+                rendered = await asyncio.to_thread(
+                    _compute_all, layer_views, snap, sample_idx
+                )
+            finally:
+                state.rendering = False
+            _apply_all(layer_views, rendered)
 
     ui.timer(0.2, tick)
 
 
-def _render_all(
-    state: _PageState,
+def _compute_all(
     views: dict[str, _LayerView],
     snap: BatchSnapshot,
-) -> None:
-    for name, view in views.items():
-        view.update(
+    sample_idx: int,
+) -> dict[str, tuple[str, str]]:
+    return {
+        name: view.compute(
             snap.activations.get(name),
             snap.activation_gradients.get(name),
-            state.sample_idx,
+            sample_idx,
         )
+        for name, view in views.items()
+    }
+
+
+def _apply_all(
+    views: dict[str, _LayerView],
+    rendered: dict[str, tuple[str, str]],
+) -> None:
+    for name, (act_html, grad_html) in rendered.items():
+        views[name].apply(act_html, grad_html)
 
 
 class _LayerView:
@@ -155,11 +178,16 @@ class _LayerView:
                 self.act_html = ui.html("")
                 self.grad_html = ui.html("")
 
-    def update(self, activation, gradient, sample_idx: int) -> None:
+    def compute(
+        self, activation: Tensor | None, gradient: Tensor | None, sample_idx: int
+    ) -> tuple[str, str]:
         act_png = render_strip(activation, sample_idx, kind="activation")
         grad_png = render_strip(gradient, sample_idx, kind="gradient")
-        self.act_html.set_content(_img_tag(act_png))
-        self.grad_html.set_content(_img_tag(grad_png))
+        return _img_tag(act_png), _img_tag(grad_png)
+
+    def apply(self, act_html: str, grad_html: str) -> None:
+        self.act_html.set_content(act_html)
+        self.grad_html.set_content(grad_html)
 
 
 def _img_tag(png: bytes | None) -> str:
