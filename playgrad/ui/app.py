@@ -37,22 +37,30 @@ from playgrad.ui.render import render_image, render_strip
 _ARCHITECTURE_CLICK_CSS: str = """
 <style>
   g.node { cursor: pointer; }
+  [data-layer] > :first-child { cursor: pointer; }
   [data-layer].playgrad-highlight {
     box-shadow: 0 0 0 3px rgb(96 165 250);
+  }
+  /* SVG nodes don't honour `box-shadow`, so the matching highlight uses
+     an SVG filter that glows around the node's shape. */
+  g.node.playgrad-highlight {
+    filter: drop-shadow(0 0 4px rgb(96 165 250));
   }
 </style>
 """
 
 # Mermaid SVG node ids look like "<element>-flowchart-<slug>-<counter>"; the
-# matching layer card carries `data-layer="<slug>"` so the click handler can
-# scroll it into view inside its (overflow-auto) parent column. We compute
-# the scroll position directly instead of using `scrollIntoView`, because
-# the latter leaves the card several dozen pixels below the column's top
-# edge here (the previous card's tail stays visible), even with
-# `block: 'start'`.
+# matching layer card carries `data-layer="<slug>"` so the click handlers
+# can cross-navigate. Clicking a Mermaid node scrolls + flashes the layer
+# card; clicking a card header scrolls + flashes the Mermaid node. We
+# compute scroll position directly instead of using `scrollIntoView`,
+# because the latter leaves the target several dozen pixels below the
+# column's top edge here (the previous item's tail stays visible), even
+# with `block: 'start'`.
 _ARCHITECTURE_CLICK_JS: str = """
 <script>
 (function() {
+  const HIGHLIGHT_MS = 1500;
   function slugFromMermaidId(id) {
     const m = /-flowchart-(.+)-\\d+$/.exec(id || '');
     return m ? m[1] : null;
@@ -68,26 +76,51 @@ _ARCHITECTURE_CLICK_JS: str = """
     }
     return null;
   }
-  document.addEventListener('click', function(e) {
-    const node = e.target.closest && e.target.closest('g.node');
-    if (!node) return;
-    const slug = slugFromMermaidId(node.id);
-    if (!slug) return;
-    const target = document.querySelector('[data-layer="' + slug + '"]');
-    if (!target) return;
+  function scrollTargetToTop(target) {
     const container = scrollableParent(target);
-    if (container) {
-      const cRect = container.getBoundingClientRect();
-      const tRect = target.getBoundingClientRect();
-      container.scrollTo({
-        top: container.scrollTop + (tRect.top - cRect.top),
-        behavior: 'smooth',
-      });
-    }
-    target.classList.add('playgrad-highlight');
+    if (!container) return;
+    const cRect = container.getBoundingClientRect();
+    const tRect = target.getBoundingClientRect();
+    container.scrollTo({
+      top: container.scrollTop + (tRect.top - cRect.top),
+      behavior: 'smooth',
+    });
+  }
+  function flashHighlight(el) {
+    el.classList.add('playgrad-highlight');
     setTimeout(function() {
-      target.classList.remove('playgrad-highlight');
-    }, 1500);
+      el.classList.remove('playgrad-highlight');
+    }, HIGHLIGHT_MS);
+  }
+  function findMermaidNode(slug) {
+    // Escape the slug because Mermaid only uses [A-Za-z0-9_], but be defensive.
+    return document.querySelector(
+      'g.node[id*="-flowchart-' + slug.replace(/"/g, '') + '-"]'
+    );
+  }
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest) return;
+    const node = e.target.closest('g.node');
+    if (node) {
+      const slug = slugFromMermaidId(node.id);
+      if (!slug) return;
+      const card = document.querySelector('[data-layer="' + slug + '"]');
+      if (!card) return;
+      scrollTargetToTop(card);
+      flashHighlight(card);
+      return;
+    }
+    const card = e.target.closest('[data-layer]');
+    if (!card) return;
+    // Only the card header (the first child) navigates back to the diagram;
+    // clicks inside the strip area shouldn't trigger a jump.
+    const header = card.firstElementChild;
+    if (!header || !header.contains(e.target)) return;
+    const slug = card.getAttribute('data-layer');
+    const mNode = findMermaidNode(slug);
+    if (!mNode) return;
+    scrollTargetToTop(mNode);
+    flashHighlight(mNode);
   });
 })();
 </script>

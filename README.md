@@ -95,7 +95,9 @@ target phase / epoch / batch) — and `detach` (run unattended without
 further pauses). The leading icon button toggles the architecture pane;
 a trailing icon button toggles the input-image pane. The left pane shows
 the module hierarchy as a Mermaid diagram; clicking a node scrolls the
-matching layer card into view. The centre pane shows one card per
+matching layer card into view, and clicking a card's header scrolls the
+diagram to its node — both ends briefly flash so it's clear what got
+hit. The centre pane shows one card per
 submodule with horizontally-scrollable activation and activation-gradient
 strips for the selected sample; the right pane shows the input image for
 that sample (RGB or grayscale), denormalized with the `input_mean` /
