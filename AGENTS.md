@@ -32,6 +32,8 @@
 ## Commit discipline
 
 - Every user requested change should be accompanied by a commit. Don't ask for permission, just do it as the last step.
+  - If multiple unrelated changes are requested within one prompt, the separate commits should be created.
+  - You can amend the last commit if it clearly introduced a bug.
 - Most commits should include corresponding test additions or changes. High level changes should incorporate documentation changes.
 - Before committing: `uv run pytest && uv run ty check`
 - Before committing: run the code. For UI testing, you can run some of the examples and use the playwright MCP.
