@@ -31,8 +31,44 @@ from torch import Tensor
 
 from playgrad.schedule import Schedule
 from playgrad.session import BatchSnapshot, Session
-from playgrad.ui.graph import build_mermaid
+from playgrad.ui.graph import build_mermaid, slug
 from playgrad.ui.render import render_image, render_strip
+
+_ARCHITECTURE_CLICK_CSS: str = """
+<style>
+  g.node { cursor: pointer; }
+  [data-layer].playgrad-highlight {
+    box-shadow: 0 0 0 3px rgb(96 165 250);
+  }
+</style>
+"""
+
+# Mermaid SVG node ids look like "<element>-flowchart-<slug>-<counter>"; the
+# matching layer card carries `data-layer="<slug>"` so the click handler can
+# scroll it into view inside its (overflow-auto) parent column.
+_ARCHITECTURE_CLICK_JS: str = """
+<script>
+(function() {
+  function slugFromMermaidId(id) {
+    const m = /-flowchart-(.+)-\\d+$/.exec(id || '');
+    return m ? m[1] : null;
+  }
+  document.addEventListener('click', function(e) {
+    const node = e.target.closest && e.target.closest('g.node');
+    if (!node) return;
+    const slug = slugFromMermaidId(node.id);
+    if (!slug) return;
+    const target = document.querySelector('[data-layer="' + slug + '"]');
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    target.classList.add('playgrad-highlight');
+    setTimeout(function() {
+      target.classList.remove('playgrad-highlight');
+    }, 1500);
+  });
+})();
+</script>
+"""
 
 
 def serve(
@@ -112,6 +148,8 @@ def _build_page(
     ui.query(".nicegui-content").classes("p-0 h-screen overflow-hidden")
     ui.query("body").classes("overflow-hidden")
     ui.query("html").classes("overflow-hidden")
+    ui.add_head_html(_ARCHITECTURE_CLICK_CSS)
+    ui.add_body_html(_ARCHITECTURE_CLICK_JS)
 
     step_until_custom = _build_step_until_custom_dialog(session)
 
@@ -368,10 +406,12 @@ class _LayerView:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        with ui.element("div").classes(
+        card = ui.element("div").classes(
             "w-full min-w-0 bg-white rounded border border-slate-300 shadow-sm "
-            "hover:border-blue-400"
-        ):
+            "hover:border-blue-400 transition-colors"
+        )
+        card.props(f'data-layer="{slug(name)}"')
+        with card:
             ui.label(name).classes(
                 "block px-3 py-1 font-mono text-sm bg-slate-100 "
                 "border-b border-slate-300 rounded-t"

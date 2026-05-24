@@ -94,11 +94,12 @@ the session with five "go" buttons — `stop`, `step batch`, `step epoch`,
 target phase / epoch / batch) — and `detach` (run unattended without
 further pauses). The leading icon button toggles the architecture pane;
 a trailing icon button toggles the input-image pane. The left pane shows
-the module hierarchy as a Mermaid diagram; the centre pane shows one card
-per submodule with horizontally-scrollable activation and
-activation-gradient strips for the selected sample; the right pane shows
-the input image for that sample (RGB or grayscale), denormalized with the
-`input_mean` / `input_std` passed to `serve()` if any.
+the module hierarchy as a Mermaid diagram; clicking a node scrolls the
+matching layer card into view. The centre pane shows one card per
+submodule with horizontally-scrollable activation and activation-gradient
+strips for the selected sample; the right pane shows the input image for
+that sample (RGB or grayscale), denormalized with the `input_mean` /
+`input_std` passed to `serve()` if any.
 
 See `INTERNALS.md` for the architecture overview.
 

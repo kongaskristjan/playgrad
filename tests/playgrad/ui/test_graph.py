@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from playgrad.ui.graph import CONFIG_HEADER, build_mermaid
+from playgrad.ui.graph import CONFIG_HEADER, ROOT_ID, build_mermaid, slug
 
 
 class TwoLayer(nn.Module):
@@ -73,6 +73,13 @@ def test_falls_back_to_hierarchy_for_untraceable_model() -> None:
 def test_hierarchy_fallback_root_label_can_be_customized() -> None:
     src = build_mermaid(DynamicShape(), root_label="my_model")
     assert '"my_model"' in src
+
+
+def test_slug_replaces_non_alphanumeric_and_handles_empty() -> None:
+    assert slug("stem.0") == "stem_0"
+    assert slug("stage1.0.conv1") == "stage1_0_conv1"
+    assert slug("relu") == "relu"
+    assert slug("") == ROOT_ID
 
 
 def test_handles_modules_with_tuple_args(monkeypatch: Any) -> None:

@@ -48,12 +48,12 @@ def _build_from_fx(model: nn.Module, traced: fx.GraphModule) -> str:
         lines.append(_node_def(node, model))
     for node in traced.graph.nodes:
         for arg in _node_inputs(node):
-            lines.append(f"  {_slug(arg.name)} --> {_slug(node.name)}")
+            lines.append(f"  {slug(arg.name)} --> {slug(node.name)}")
     return "\n".join(lines)
 
 
 def _node_def(node: fx.Node, model: nn.Module) -> str:
-    node_id = _slug(node.name)
+    node_id = slug(node.name)
     if node.op == "placeholder":
         return f'  {node_id}(["in: {node.name}"])'
     if node.op == "output":
@@ -96,14 +96,21 @@ def _build_from_hierarchy(model: nn.Module, *, root_label: str) -> str:
         if module is model:
             continue
         label = f"{full_name}<br/>{type(module).__name__}"
-        lines.append(f'  {_slug(full_name)}["{label}"]')
+        lines.append(f'  {slug(full_name)}["{label}"]')
     for full_name, module in model.named_modules():
-        parent_id = ROOT_ID if module is model else _slug(full_name)
+        parent_id = ROOT_ID if module is model else slug(full_name)
         for child_name, _ in module.named_children():
             child_full = f"{full_name}.{child_name}" if full_name else child_name
-            lines.append(f"  {parent_id} --> {_slug(child_full)}")
+            lines.append(f"  {parent_id} --> {slug(child_full)}")
     return "\n".join(lines)
 
 
-def _slug(name: str) -> str:
+def slug(name: str) -> str:
+    """Map a node/layer name to the id used in Mermaid sources and the DOM.
+
+    Mermaid only accepts `[A-Za-z0-9_]` in node ids, so dots in dotted
+    module paths (`stem.0`) become underscores (`stem_0`). The same slug
+    is used on the per-layer card via `data-layer=...` so clicks on a
+    Mermaid node can find their matching card.
+    """
     return re.sub(r"[^A-Za-z0-9]", "_", name) or ROOT_ID
