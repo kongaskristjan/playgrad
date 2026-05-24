@@ -95,7 +95,7 @@ def _build_page(
     step_until_custom = _build_step_until_custom_dialog(session)
 
     with ui.row().classes(
-        "w-full items-center gap-1 p-1 border-b bg-white sticky top-0 z-10"
+        "w-full items-center gap-x-3 gap-y-0 p-1 border-b bg-white sticky top-0 z-10"
     ):
         ui.button("Stop", on_click=session.stop, color="red").props("dense size=md")
         ui.button("Step Batch", on_click=session.step_batch, color="orange").props("dense size=md")
