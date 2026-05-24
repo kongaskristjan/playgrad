@@ -74,6 +74,7 @@ def serve(
 class _PageState:
     sample_idx: int = 0
     last_snapshot: BatchSnapshot | None = None
+    dirty: bool = False
 
 
 def _build_page(
@@ -98,9 +99,7 @@ def _build_page(
         def on_sample_change(e: object) -> None:
             value = getattr(e, "value", None)
             state.sample_idx = int(value) if value is not None else 0
-            snap = session.snapshot
-            if snap is not None:
-                _render_all(state, layer_views, snap)
+            state.dirty = True
 
         sample_input.on_value_change(on_sample_change)
 
@@ -117,8 +116,9 @@ def _build_page(
             return
         pos = snap.position
         position_label.text = f"epoch {pos.epoch} | {pos.phase} batch {pos.batch_idx}"
-        if snap is not state.last_snapshot:
+        if snap is not state.last_snapshot or state.dirty:
             state.last_snapshot = snap
+            state.dirty = False
             _render_all(state, layer_views, snap)
 
     ui.timer(0.2, tick)
