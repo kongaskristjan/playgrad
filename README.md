@@ -45,13 +45,17 @@ flip + normalisation).
 
 ### Architecture
 
-`examples/cifar10/resnet.py` defines a CIFAR ResNet:
+`examples/cifar10/resnet.py` defines a pre-activation CIFAR ResNet (ResNet v2,
+He et al. 2016) with ResNet-D-style downsampling shortcuts (He et al. 2018):
 
 - 3x3 stem conv into 16 channels.
-- Three stages of `BasicBlock`s at widths `(16, 32, 64)` with `stride=2`
-  downsampling between stages. The shortcut uses a 1x1 conv when the shapes
-  change, otherwise identity.
-- Global average pool into a linear classifier.
+- Three stages of `PreActBlock`s at widths `(16, 32, 64)`. Each block is
+  `BN -> ReLU -> 3x3 conv -> BN -> ReLU -> 3x3 conv`, then adds the shortcut,
+  keeping the identity path free of nonlinearities and batch-norms.
+- Stage transitions downsample with `stride=2` and use the ResNet-D shortcut:
+  a 2x2 average pool followed by a 1x1 conv (no info-losing strided 1x1, no
+  extra BN on the shortcut path).
+- A final BN + ReLU before global average pool, then a linear classifier.
 
 `resnet20()` is a convenience constructor (`blocks_per_stage=3`,
 ~270k parameters).

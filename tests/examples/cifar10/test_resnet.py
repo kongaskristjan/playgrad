@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from examples.cifar10.resnet import BasicBlock, ResNetCIFAR, resnet20
+from examples.cifar10.resnet import PreActBlock, ResNetCIFAR, resnet20
 from examples.cifar10.train import evaluate, train_one_epoch
 
 
@@ -18,11 +18,26 @@ from examples.cifar10.train import evaluate, train_one_epoch
         (32, 64, 2, 4),
     ],
 )
-def test_basic_block_shapes(in_channels: int, out_channels: int, stride: int, expected_hw: int) -> None:
-    block = BasicBlock(in_channels, out_channels, stride=stride)
+def test_preact_block_shapes(in_channels: int, out_channels: int, stride: int, expected_hw: int) -> None:
+    block = PreActBlock(in_channels, out_channels, stride=stride)
     x = torch.randn(2, in_channels, 8, 8)
     y = block(x)
     assert y.shape == (2, out_channels, expected_hw, expected_hw)
+
+
+def test_preact_block_identity_shortcut_is_clean() -> None:
+    """A same-shape block must use a parameter-free identity shortcut."""
+    block = PreActBlock(16, 16, stride=1)
+    assert isinstance(block.shortcut, nn.Identity)
+
+
+def test_preact_block_downsample_uses_avgpool_shortcut() -> None:
+    """ResNet-D: downsampling shortcuts avg-pool first, then 1x1 conv (no BN)."""
+    block = PreActBlock(16, 32, stride=2)
+    children = list(block.shortcut.children())
+    assert isinstance(children[0], nn.AvgPool2d)
+    assert isinstance(children[1], nn.Conv2d)
+    assert not any(isinstance(m, nn.BatchNorm2d) for m in block.shortcut.modules())
 
 
 @pytest.mark.parametrize("blocks_per_stage", [1, 2, 3])
