@@ -90,18 +90,22 @@ def _build_page(
     state = _PageState()
     layer_views: dict[str, _LayerView] = {}
 
+    ui.query(".nicegui-content").classes("p-0")
+
     step_until_custom = _build_step_until_custom_dialog(session)
 
-    with ui.row().classes("w-full items-center gap-2 p-2 border-b"):
-        ui.button("Stop", on_click=session.stop, color="red")
-        ui.button("Step Batch", on_click=session.step_batch, color="orange")
-        ui.button("Step Epoch", on_click=session.step_epoch, color="orange")
-        ui.button("Step Until End", on_click=session.step_run, color="orange")
-        ui.button("Step Until Custom", on_click=step_until_custom.open, color="orange")
-        ui.button("Detach", on_click=session.detach, color="green")
-        position_label = ui.label("(waiting for first snapshot)").classes("ml-4 font-mono")
-        ui.label("Sample:").classes("ml-4")
-        sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20")
+    with ui.row().classes(
+        "w-full items-center gap-1 p-1 border-b bg-white sticky top-0 z-10"
+    ):
+        ui.button("Stop", on_click=session.stop, color="red").props("dense size=md")
+        ui.button("Step Batch", on_click=session.step_batch, color="orange").props("dense size=md")
+        ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props("dense size=md")
+        ui.button("Step Until End", on_click=session.step_run, color="orange").props("dense size=md")
+        ui.button("Step Until Custom", on_click=step_until_custom.open, color="orange").props("dense size=md")
+        ui.button("Detach", on_click=session.detach, color="green").props("dense size=md")
+        position_label = ui.label("(waiting for first snapshot)").classes("ml-3 font-mono text-sm")
+        ui.label("Sample:").classes("ml-3 text-sm")
+        sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
 
         def _defer_clamp_display(target: int) -> None:
             # NiceGUI suppresses .value writes made from inside a value-change
@@ -123,10 +127,10 @@ def _build_page(
 
         sample_input.on_value_change(on_sample_change)
 
-    with ui.row().classes("w-full no-wrap").style("height: calc(100vh - 64px)"):
-        with ui.column().classes("w-1/2 h-full overflow-auto p-2"):
+    with ui.row().classes("w-full no-wrap gap-0").style("height: calc(100vh - 40px)"):
+        with ui.column().classes("w-1/4 h-full overflow-auto p-1"):
             ui.mermaid(mermaid_src).classes("w-full")
-        with ui.column().classes("w-1/2 h-full overflow-auto p-2"):
+        with ui.column().classes("w-3/4 h-full overflow-auto p-1 gap-2"):
             for name in layer_names:
                 layer_views[name] = _LayerView(name)
 
@@ -294,7 +298,7 @@ class _LayerView:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        with ui.card().classes("w-full mb-2"):
+        with ui.card().classes("w-full p-2 gap-1"):
             ui.label(name).classes("font-mono text-sm")
             with ui.element("div").classes("w-full overflow-x-auto"):
                 self.act_html = ui.html("")
