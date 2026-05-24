@@ -93,12 +93,12 @@ def _build_page(
     step_until_custom = _build_step_until_custom_dialog(session)
 
     with ui.row().classes("w-full items-center gap-2 p-2 border-b"):
-        ui.button("Stop", on_click=session.stop)
-        ui.button("Step Batch", on_click=session.step_batch)
-        ui.button("Step Epoch", on_click=session.step_epoch)
-        ui.button("Step Until End", on_click=session.step_run)
-        ui.button("Step Until Custom", on_click=step_until_custom.open)
-        ui.button("Detach", on_click=session.detach)
+        ui.button("Stop", on_click=session.stop, color="red")
+        ui.button("Step Batch", on_click=session.step_batch, color="orange")
+        ui.button("Step Epoch", on_click=session.step_epoch, color="orange")
+        ui.button("Step Until End", on_click=session.step_run, color="orange")
+        ui.button("Step Until Custom", on_click=step_until_custom.open, color="orange")
+        ui.button("Detach", on_click=session.detach, color="green")
         position_label = ui.label("(waiting for first snapshot)").classes("ml-4 font-mono")
         ui.label("Sample:").classes("ml-4")
         sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20")
@@ -159,17 +159,18 @@ def _build_step_until_custom_dialog(session: Session) -> ui.dialog:
     schedule = session.schedule
     phase_names = list(schedule.phases)
 
-    with ui.dialog() as dialog, ui.card():
-        ui.label("Step until position").classes("text-lg font-bold")
-        epoch_input = ui.number(
-            label="Epoch", value=0, min=0, step=1, format="%d"
-        ).classes("w-32")
-        phase_select = ui.select(
-            phase_names, label="Phase", value=phase_names[0]
-        ).classes("w-32")
-        batch_input = ui.number(
-            label="Batch", value=0, min=0, step=1, format="%d"
-        ).classes("w-32")
+    with ui.dialog() as dialog, ui.card().classes("min-w-96 p-6 gap-4"):
+        ui.label("Step until custom").classes("text-lg font-bold")
+        with ui.row().classes("w-full gap-4 items-end no-wrap"):
+            epoch_input = ui.number(
+                label="Epoch", value=0, min=0, step=1, format="%d"
+            ).classes("flex-1")
+            phase_select = ui.select(
+                phase_names, label="Phase", value=phase_names[0]
+            ).classes("flex-1")
+            batch_input = ui.number(
+                label="Batch", value=0, min=0, step=1, format="%d"
+            ).classes("flex-1")
         error_label = ui.label("").classes("text-red-500 text-sm min-h-4")
 
         def submit() -> None:
