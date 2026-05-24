@@ -25,15 +25,17 @@ def test_preact_block_shapes(in_channels: int, out_channels: int, stride: int, e
     assert y.shape == (2, out_channels, expected_hw, expected_hw)
 
 
-def test_preact_block_identity_shortcut_is_clean() -> None:
-    """A same-shape block must use a parameter-free identity shortcut."""
+def test_preact_block_same_shape_has_no_shortcut_submodule() -> None:
+    """A same-shape block must add the input directly with no shortcut submodule."""
     block = PreActBlock(16, 16, stride=1)
-    assert isinstance(block.shortcut, nn.Identity)
+    assert block.shortcut is None
+    assert "shortcut" not in dict(block.named_children())
 
 
 def test_preact_block_downsample_uses_avgpool_shortcut() -> None:
     """ResNet-D: downsampling shortcuts avg-pool first, then 1x1 conv (no BN)."""
     block = PreActBlock(16, 32, stride=2)
+    assert block.shortcut is not None
     children = list(block.shortcut.children())
     assert isinstance(children[0], nn.AvgPool2d)
     assert isinstance(children[1], nn.Conv2d)

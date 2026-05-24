@@ -16,7 +16,12 @@ from torch import Tensor, nn
 
 
 class PreActBlock(nn.Module):
-    """Pre-activation basic block: BN-ReLU-Conv x2 with an identity shortcut."""
+    """Pre-activation basic block: BN-ReLU-Conv x2 with an optional shortcut.
+
+    A `shortcut` submodule is only registered when the residual path
+    changes shape (stride or channel count); in the same-shape case the
+    input is added directly without a wrapping `nn.Identity()`.
+    """
 
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
         super().__init__()
@@ -29,7 +34,7 @@ class PreActBlock(nn.Module):
             out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False
         )
 
-        self.shortcut: nn.Module
+        self.shortcut: nn.Module | None
         if stride != 1 or in_channels != out_channels:
             layers: list[nn.Module] = []
             if stride != 1:
@@ -39,14 +44,15 @@ class PreActBlock(nn.Module):
             )
             self.shortcut = nn.Sequential(*layers)
         else:
-            self.shortcut = nn.Identity()
+            self.shortcut = None
 
     def forward(self, x: Tensor) -> Tensor:
         out = torch.relu(self.bn1(x))
         out = self.conv1(out)
         out = torch.relu(self.bn2(out))
         out = self.conv2(out)
-        return out + self.shortcut(x)
+        residual = self.shortcut(x) if self.shortcut is not None else x
+        return out + residual
 
 
 class ResNetCIFAR(nn.Module):
