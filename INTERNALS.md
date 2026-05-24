@@ -58,6 +58,7 @@ For non-deterministic workloads, `Session.set_schedule()` re-declares
 | `UNTIL_PHASE_CHANGE` | `step_phase()` | `is_last_in_phase` |
 | `UNTIL_EPOCH_CHANGE` | `step_epoch()` | `is_last_in_epoch` |
 | `UNTIL_END` | `step_run()` | `is_last_overall` |
+| `UNTIL_POSITION` | `step_until_position(phase, epoch, batch_idx)` | exactly that `(phase, epoch, batch_idx)` |
 | `DETACH` | `detach()` | never |
 
 A session starts in `STEP` mode — the first batch always pauses so the UI
@@ -257,5 +258,5 @@ playgrad.start(model, epochs, phases)
         │
         ▼ (UI thread, anytime)
    stop / step_batch / step_phase / step_epoch /
-   step_run / detach / close
+   step_run / step_until_position / detach / close
 ```

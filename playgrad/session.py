@@ -17,7 +17,8 @@ parameter `.grad` is still populated when the context manager exits, so the
 session reads it straight off the model — no backward hooks needed.
 
 The UI (added later) drives the session by calling `stop`, `step_batch`,
-`step_phase`, `step_epoch`, `step_run`, `detach`, and finally `close`.
+`step_phase`, `step_epoch`, `step_run`, `step_until_position`, `detach`,
+and finally `close`.
 Whether the session captures activations/gradients for a given batch is
 decided up-front at `__enter__` from the schedule + current mode, so
 forward hooks are only installed for batches that will actually be
@@ -44,6 +45,7 @@ class Mode(StrEnum):
     UNTIL_PHASE_CHANGE = "until_phase_change"
     UNTIL_EPOCH_CHANGE = "until_epoch_change"
     UNTIL_END = "until_end"
+    UNTIL_POSITION = "until_position"
     DETACH = "detach"
 
 
@@ -74,6 +76,7 @@ class Session:
         self.model = model
         self._schedule = Schedule(epochs=epochs, phases=phases)
         self._mode: Mode = Mode.STEP
+        self._target_position: tuple[str, int, int] | None = None
         self._cv = threading.Condition()
         self._resume_token = 0
         self._pause_count = 0
@@ -155,6 +158,11 @@ class Session:
     def step_run(self) -> None:
         self._set_mode(Mode.UNTIL_END, resume=True)
 
+    def step_until_position(self, *, phase: str, epoch: int, batch_idx: int) -> None:
+        with self._cv:
+            self._target_position = (phase, epoch, batch_idx)
+        self._set_mode(Mode.UNTIL_POSITION, resume=True)
+
     def detach(self) -> None:
         self._set_mode(Mode.DETACH, resume=True)
 
@@ -187,6 +195,7 @@ class Session:
             if self._closed:
                 return False
             mode = self._mode
+            target = self._target_position
         match mode:
             case Mode.STEP:
                 return True
@@ -196,6 +205,10 @@ class Session:
                 return pos.is_last_in_epoch
             case Mode.UNTIL_END:
                 return pos.is_last_overall
+            case Mode.UNTIL_POSITION:
+                if target is None:
+                    return False
+                return (pos.phase, pos.epoch, pos.batch_idx) == target
             case Mode.DETACH:
                 return False
 

@@ -138,6 +138,33 @@ def test_until_phase_change_captures_only_phase_end() -> None:
     assert captured_positions == [("train", 0, 2)]
 
 
+def test_step_until_position_captures_only_at_target() -> None:
+    session, model = _make_session(epochs=2, phases={"train": 2, "val": 2})
+
+    captured_positions: list[tuple[str, int, int]] = []
+
+    def loop() -> None:
+        for epoch in range(2):
+            for phase, n in [("train", 2), ("val", 2)]:
+                for _ in range(n):
+                    with session.batch(phase=phase, epoch=epoch) as ctx:
+                        _train_step(model)
+                    if ctx.captured and ctx.position is not None:
+                        captured_positions.append(
+                            (ctx.position.phase, ctx.position.epoch, ctx.position.batch_idx)
+                        )
+
+    session.step_until_position(phase="val", epoch=0, batch_idx=1)
+    thread = _run_in_thread(loop)
+
+    assert session.wait_until_paused(timeout=5)
+    session.detach()
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert captured_positions == [("val", 0, 1)]
+
+
 def test_until_epoch_change_captures_only_epoch_end() -> None:
     session, model = _make_session(epochs=2, phases={"train": 2, "val": 2})
 

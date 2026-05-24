@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from nicegui import ui
 from torch import Tensor
 
+from playgrad.schedule import Schedule
 from playgrad.session import BatchSnapshot, Session
 from playgrad.ui.graph import build_mermaid
 from playgrad.ui.render import render_strip
@@ -89,12 +90,14 @@ def _build_page(
     state = _PageState()
     layer_views: dict[str, _LayerView] = {}
 
+    step_until_custom = _build_step_until_custom_dialog(session)
+
     with ui.row().classes("w-full items-center gap-2 p-2 border-b"):
         ui.button("Stop", on_click=session.stop)
         ui.button("Step Batch", on_click=session.step_batch)
-        ui.button("Step Phase", on_click=session.step_phase)
         ui.button("Step Epoch", on_click=session.step_epoch)
-        ui.button("Step Run", on_click=session.step_run)
+        ui.button("Step Until End", on_click=session.step_run)
+        ui.button("Step Until Custom", on_click=step_until_custom.open)
         ui.button("Detach", on_click=session.detach)
         position_label = ui.label("(waiting for first snapshot)").classes("ml-4 font-mono")
         ui.label("Sample:").classes("ml-4")
@@ -150,6 +153,83 @@ def _build_page(
             _apply_all(layer_views, rendered)
 
     ui.timer(0.2, tick)
+
+
+def _build_step_until_custom_dialog(session: Session) -> ui.dialog:
+    schedule = session.schedule
+    phase_names = list(schedule.phases)
+
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Step until position").classes("text-lg font-bold")
+        epoch_input = ui.number(
+            label="Epoch", value=0, min=0, step=1, format="%d"
+        ).classes("w-32")
+        phase_select = ui.select(
+            phase_names, label="Phase", value=phase_names[0]
+        ).classes("w-32")
+        batch_input = ui.number(
+            label="Batch", value=0, min=0, step=1, format="%d"
+        ).classes("w-32")
+        error_label = ui.label("").classes("text-red-500 text-sm min-h-4")
+
+        def submit() -> None:
+            try:
+                epoch = int(epoch_input.value) if epoch_input.value is not None else 0
+                batch_idx = int(batch_input.value) if batch_input.value is not None else 0
+            except (TypeError, ValueError):
+                error_label.text = "Invalid input"
+                return
+            phase = str(phase_select.value)
+            error = _validate_step_until_target(
+                schedule=schedule,
+                snapshot=session.snapshot,
+                phase=phase,
+                epoch=epoch,
+                batch_idx=batch_idx,
+            )
+            if error is not None:
+                error_label.text = error
+                return
+            error_label.text = ""
+            session.step_until_position(phase=phase, epoch=epoch, batch_idx=batch_idx)
+            dialog.close()
+
+        with ui.row():
+            ui.button("Cancel", on_click=dialog.close)
+            ui.button("Step", on_click=submit)
+
+    return dialog
+
+
+def _validate_step_until_target(
+    *,
+    schedule: Schedule,
+    snapshot: BatchSnapshot | None,
+    phase: str,
+    epoch: int,
+    batch_idx: int,
+) -> str | None:
+    phases = schedule.phases
+    if phase not in phases:
+        return f"Unknown phase {phase!r}"
+    if not 0 <= epoch < schedule.epochs:
+        return f"Epoch must be in [0, {schedule.epochs - 1}]"
+    declared = phases[phase]
+    if not 0 <= batch_idx < declared:
+        return f"Batch must be in [0, {declared - 1}] for phase {phase!r}"
+    if snapshot is not None:
+        cur = snapshot.position
+        target_rank = _position_rank(phases, phase, epoch, batch_idx)
+        current_rank = _position_rank(phases, cur.phase, cur.epoch, cur.batch_idx)
+        if target_rank <= current_rank:
+            return "Target must be after the current position"
+    return None
+
+
+def _position_rank(
+    phases: dict[str, int], phase: str, epoch: int, batch_idx: int
+) -> tuple[int, int, int]:
+    return (epoch, list(phases).index(phase), batch_idx)
 
 
 def _snapshot_batch_size(snap: BatchSnapshot) -> int | None:
