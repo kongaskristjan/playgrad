@@ -37,6 +37,6 @@
 - Most commits should include corresponding test additions or changes. High level changes should incorporate documentation changes.
 - Before committing: `uv run pytest && uv run ty check`
 - Before committing: run the code. For UI testing, you can run some of the examples and use the playwright MCP.
-  - Use `--playgrad-port 5000`. Try to leave 8080 intact, as the user might have a session on that.
+  - Use `--playgrad-port [PORT_NUMBER]`, where `[PORT_NUMBER]` is found from `port_number.txt`. Don't kill sessions on other ports, as they may have been started by the user or other concurrent agents.
 - `README.md` and `INTERNALS.md` should be kept up to date
 
