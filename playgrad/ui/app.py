@@ -343,11 +343,8 @@ def _build_page(
             ui.button("Step Epoch", on_click=session.step_epoch, color="orange").props(
                 "dense size=md"
             ).tooltip("Run until the epoch changes, then pause")
-            ui.button("Step Until End", on_click=session.step_run, color="orange").props(
-                "dense size=md"
-            ).tooltip("Run to the end of training")
             ui.button(
-                "Step Until Custom", on_click=step_until_custom.open, color="orange"
+                "Step Custom", on_click=step_until_custom.open, color="orange"
             ).props("dense size=md").tooltip("Pick a phase/epoch/batch to pause at")
             ui.button("Detach", on_click=session.detach, color="green").props(
                 "dense size=md"
@@ -358,8 +355,10 @@ def _build_page(
             watch_chip = ui.button(
                 str(len(session.watched_layers)),
                 icon="visibility",
-                color="amber-600",
-            ).classes("ml-auto").props("dense size=md outline").tooltip(
+                color="slate-100",
+            ).classes(
+                "ml-auto text-amber-700 font-mono"
+            ).props("dense size=md no-caps").tooltip(
                 "Watched layers — click to open the watch view or jump to a card"
             )
             watch_list_container: ui.column
@@ -957,7 +956,7 @@ class _LayerView:
         card.props(f'data-layer="{slug(name)}"')
         with card:
             with ui.row().classes(
-                "items-center w-full no-wrap gap-2 px-3 py-1 bg-slate-100 "
+                "items-center w-full no-wrap gap-2 pl-3 pr-1 py-1 bg-slate-100 "
                 "border-b border-slate-300 rounded-t"
             ):
                 ui.label(name).classes(
@@ -970,10 +969,12 @@ class _LayerView:
                 # its rendered DOM, so the attribute lives on this div.
                 with ui.element("div").props("data-watch-toggle"):
                     self._eye_btn = ui.button(
-                        icon="visibility_off",
+                        "Watch",
+                        icon="visibility",
                         on_click=lambda: on_toggle_watch(name),
-                    ).props("dense flat round size=sm").classes(
-                        "text-slate-500"
+                        color="green",
+                    ).props("dense no-caps").style(
+                        "min-height: 0; padding: 1px 6px; font-size: 11px"
                     ).tooltip("Watch this layer (toggle)")
             with ui.element("div").classes("w-full overflow-x-auto p-2"):
                 self.act_html = ui.html("")
@@ -986,11 +987,9 @@ class _LayerView:
 
     def refresh_eye(self) -> None:
         on = self.name in self._session.watched_layers
-        self._eye_btn.icon = "visibility" if on else "visibility_off"
-        if on:
-            self._eye_btn.classes(add="text-amber-600", remove="text-slate-500")
-        else:
-            self._eye_btn.classes(add="text-slate-500", remove="text-amber-600")
+        self._eye_btn.text = "Unwatch" if on else "Watch"
+        self._eye_btn.icon = "visibility_off" if on else "visibility"
+        self._eye_btn.props(f"color={'red' if on else 'green'}")
 
     def compute(
         self, activation: Tensor | None, gradient: Tensor | None, sample_idx: int
