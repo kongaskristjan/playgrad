@@ -150,8 +150,9 @@ _ARCHITECTURE_CLICK_JS: str = """
     if (!container) return;
     const cRect = container.getBoundingClientRect();
     const tRect = target.getBoundingClientRect();
+    const topPadding = 12;
     container.scrollTo({
-      top: container.scrollTop + (tRect.top - cRect.top),
+      top: container.scrollTop + (tRect.top - cRect.top) - topPadding,
       behavior: 'smooth',
     });
   }
