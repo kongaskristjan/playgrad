@@ -144,16 +144,17 @@ class Session:
             return frozenset(self._watched_layers)
 
     def watch(self, layer: str) -> bool:
-        """Start collecting stats for `layer`. Returns False if not a module.
+        """Start collecting stats for `layer`. Returns False for unknown names.
 
-        Layers that don't resolve to an `nn.Module` (e.g. graph inputs or fx
-        intermediate ops like `relu`/`add`) can't be watched because we
-        attach forward hooks to compute the stats. Non-module layer names
-        are silently ignored.
+        Any name that appears in `Session.layer_names` is watchable: named
+        modules, graph inputs (e.g. `x`), and fx-traced intermediate ops
+        (`relu`, `add`, `mean`). Watching activates the full capture
+        machinery on every batch — fx interpreter when traceable, root
+        pre-hook + per-module hooks otherwise — so the visualisation runs
+        at capture-mode speed regardless of pause behaviour. Real training
+        runs should not enable the UI.
         """
-        try:
-            self.model.get_submodule(layer)
-        except AttributeError:
+        if layer not in self._layer_names:
             return False
         with self._cv:
             self._watched_layers.add(layer)
@@ -258,24 +259,6 @@ class Session:
         self._hook_handles.append(pre)
         for name, module in self.model.named_modules():
             if module is self.model:
-                continue
-            handle = module.register_forward_hook(self._make_hook(name))
-            self._hook_handles.append(handle)
-
-    def _install_stats_hooks(self, watched: set[str]) -> None:
-        """Install forward hooks on only the watched modules.
-
-        Unlike `_install_hooks`, this never patches `model.forward` even in
-        fx mode — we want the user's normal forward path on non-capture
-        batches. Per-module forward hooks fire during the regular forward
-        regardless of fx, so the watched modules' outputs (with `retain_grad`)
-        land in `self._activations` and are available after `loss.backward()`.
-        """
-        self._activations.clear()
-        for name in watched:
-            try:
-                module = self.model.get_submodule(name)
-            except AttributeError:
                 continue
             handle = module.register_forward_hook(self._make_hook(name))
             self._hook_handles.append(handle)
@@ -427,12 +410,16 @@ class _BatchContext:
             return self
         self._position = self._session._schedule.advance(self._phase, self._epoch)
         self._captured = self._session._should_capture(self._position)
-        watched = self._session._watched_layers
-        if self._captured:
+        self._stats_only = (
+            not self._captured and bool(self._session._watched_layers)
+        )
+        # Capture and stats-only use the same hook installation: full fx
+        # interpreter (or full per-module hooks + root pre-hook in
+        # hook-mode). That way any name in `layer_names` — inputs, fx
+        # intermediates, modules — can be watched. The only difference
+        # is whether we publish a snapshot and pause at __exit__.
+        if self._captured or self._stats_only:
             self._session._install_hooks()
-        elif watched:
-            self._stats_only = True
-            self._session._install_stats_hooks(watched)
         return self
 
     def __exit__(

@@ -185,29 +185,36 @@ A `(layer, pause_count)` cache in the UI keeps re-opens free.
 ## Watch accumulators
 
 Independently of the snapshot path, the session can collect running
-statistics for any subset of named modules — driven by the eye-icon
+statistics for any subset of layer names — driven by the eye-icon
 toggle on the main page, surfaced on the `/watch` deep-dive page.
 
 `Session.watch(name)` / `unwatch(name)` mutate the `_watched_layers`
 set under `_cv`. The `Session.watched_layers` snapshot is a
-`frozenset`, safe to read from the UI thread. `watch()` only accepts
-names that `model.get_submodule()` resolves — fx-graph intermediates
-(`relu`, `add`) and graph inputs (`x`) can't be watched because the
-stats path attaches per-module forward hooks.
+`frozenset`, safe to read from the UI thread. `watch()` accepts any
+name in `session.layer_names`: named modules, fx-traced intermediates
+(`relu`, `add`, `mean`), and graph inputs (`x`).
 
-`_BatchContext` gains a stats-only path: if any layer is watched but
-the batch is *not* a capture batch (`detach`, mid-`step_run`, etc.),
-`_install_stats_hooks(watched)` installs forward hooks only on the
-watched modules. These hooks reuse `_make_hook`, so they populate
-`_activations` and call `retain_grad()` the same way the capture
-hooks do — the live tensor and its `.grad` are both available when
-`__exit__` runs. Crucially, this path **does not** patch
-`model.forward` even when fx tracing succeeded, so the user's normal
-forward runs untouched on non-capture batches.
+`_BatchContext` extends the capture machinery to cover watching too.
+If any layer is watched but the batch is *not* a capture batch
+(`detach`, mid-`step_run`, etc.), `_install_hooks()` still runs — the
+same fx interpreter or pre-hook+per-module-hook installation that the
+snapshot path uses — so every name in `layer_names` lands in
+`_activations` with `retain_grad()` applied. The only difference
+between capture and stats-only batches is that capture also publishes
+a snapshot and pauses; stats-only batches just compute stats and let
+the training loop continue.
+
+This is a deliberate trade: when watching is active, the user is
+already paying capture-mode forward cost on every batch (fx
+interpretation Python overhead, doubled activation memory from
+`retain_grad`). That's the price of an accurate visualisation;
+production runs should not enable the UI in the first place. The
+benefit is that any node in the graph is reachable for stats without
+a separate code path.
 
 At `__exit__`, before snapshot publishing, `_update_watch_stats(pos)`
-walks `_watched_layers` and feeds each module's activation and
-gradient into `WatchAccumulator.update(layer, phase, epoch, kind, x)`.
+walks `_watched_layers` and feeds each captured tensor's activation
+and gradient into `WatchAccumulator.update(layer, phase, epoch, kind, x)`.
 The accumulator is keyed by `(layer, phase, epoch)` so each
 epoch/phase gets its own bucket and history accumulates rather than
 overwriting. Unwatching a layer drops every key for it via
@@ -244,11 +251,11 @@ is a frozen dataclass tree (`WatchSnapshot → LayerStatsSnapshot →
 TensorStatsSnapshot`) that the UI can render without holding any
 session state.
 
-The watch path adds zero overhead when nothing is watched and
-O(watched_modules) cost per batch when at least one layer is. In
-particular, the existing capture path is untouched on non-watching
-sessions, so the snapshot timeline and pause behaviour are
-unaffected.
+The watch path adds zero overhead when nothing is watched. With at
+least one layer watched, every batch pays capture-mode cost — that's
+the cost of exposing fx intermediates and inputs to the stats
+collector without a parallel implementation. Snapshot timeline and
+pause behaviour are unaffected on non-watching sessions.
 
 ## UI layer
 

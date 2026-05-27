@@ -503,11 +503,14 @@ def test_hooks_removed_after_each_batch() -> None:
     thread.join(timeout=5)
 
 
-def test_watch_rejects_non_module_names() -> None:
+def test_watch_accepts_any_layer_name_and_rejects_unknown() -> None:
     session, model = _make_session()
+    # Modules, fx intermediates, and the input are all in layer_names.
     assert session.watch("fc1") is True
+    assert session.watch("relu") is True  # fx intermediate
+    assert session.watch("x") is True  # graph input
     assert session.watch("bogus") is False
-    assert session.watched_layers == frozenset({"fc1"})
+    assert session.watched_layers == frozenset({"fc1", "relu", "x"})
 
 
 def test_watch_accumulates_stats_while_detached() -> None:
@@ -561,15 +564,60 @@ def test_unwatch_drops_collected_stats() -> None:
     assert session.watch_snapshot().stats == {}
 
 
-def test_watching_does_not_install_capture_hooks_under_detach() -> None:
-    """In detach mode with watching, only the watched module gets a hook."""
+def test_watching_uses_full_capture_machinery_under_detach() -> None:
+    """Watching engages the same hook path as capture, so fx intermediates work."""
     session, model = _make_session(epochs=1, phases={"train": 1})
     session.watch("fc1")
     session.detach()
 
     with session.batch(phase="train", epoch=0):
-        # Inside the context, hooks are installed only for the watched module.
-        assert len(session._hook_handles) == 1  # type: ignore[reportPrivateUsage]
+        # The exact handle count depends on fx-vs-hook mode; what matters
+        # is that *something* got installed (capture machinery is live).
+        # TinyNet (no Module-only ops between modules) traces cleanly, so
+        # fx mode patches forward without registering RemovableHandles
+        # — `_original_forward` is the signal there.
+        installed = (
+            len(session._hook_handles) > 0  # type: ignore[reportPrivateUsage]
+            or session._original_forward is not None  # type: ignore[reportPrivateUsage]
+        )
+        assert installed
         _train_step(model)
-    # All hooks removed at exit.
     assert session._hook_handles == []  # type: ignore[reportPrivateUsage]
+    assert session._original_forward is None  # type: ignore[reportPrivateUsage]
+
+
+def test_watch_fx_intermediate_accumulates_stats() -> None:
+    """Watching an fx-traced intermediate op (`relu`) produces stats."""
+    session, model = _make_session(epochs=1, phases={"train": 1})
+    assert session.fx_traced
+    assert "relu" in session.layer_names
+    session.watch("relu")
+    session.detach()
+
+    with session.batch(phase="train", epoch=0):
+        _train_step(model)
+
+    snap = session.watch_snapshot()
+    assert ("relu", "train", 0) in snap.stats
+    relu_stats = snap.stats[("relu", "train", 0)].activations
+    # ReLU output is non-negative — the histogram's negative half is empty.
+    from playgrad.watch import ZERO_BIN
+    neg_count = sum(relu_stats.hist[:ZERO_BIN])
+    assert neg_count == 0
+    assert relu_stats.n == 16  # batch 2 × 8 hidden features
+
+
+def test_watch_input_x_accumulates_stats() -> None:
+    """Watching the graph input `x` produces stats."""
+    session, model = _make_session(epochs=1, phases={"train": 1})
+    assert "x" in session.layer_names
+    session.watch("x")
+    session.detach()
+
+    with session.batch(phase="train", epoch=0):
+        _train_step(model)
+
+    snap = session.watch_snapshot()
+    assert ("x", "train", 0) in snap.stats
+    x_stats = snap.stats[("x", "train", 0)].activations
+    assert x_stats.n == 8  # batch 2 × 4 input features
