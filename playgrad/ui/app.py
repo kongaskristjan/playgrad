@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import threading
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import uvicorn
@@ -47,6 +49,30 @@ _ARCHITECTURE_CLICK_CSS: str = """
   g.node.playgrad-highlight {
     filter: drop-shadow(0 0 4px rgb(96 165 250));
   }
+  /* Watched: stronger, amber-tinted treatment that persists across hover.
+     Distinct from the blue hover highlight so the two signals don't
+     blur into one. */
+  [data-layer].playgrad-watched {
+    box-shadow:
+      0 0 0 3px rgb(245 158 11),
+      0 0 12px rgba(245, 158, 11, 0.55);
+  }
+  g.node.playgrad-watched {
+    filter:
+      drop-shadow(0 0 6px rgb(245 158 11))
+      drop-shadow(0 0 3px rgb(245 158 11));
+  }
+  /* Watched + hovered: amber ring stays, blue layered around it. */
+  [data-layer].playgrad-watched.playgrad-highlight {
+    box-shadow:
+      0 0 0 3px rgb(245 158 11),
+      0 0 0 6px rgba(96, 165, 250, 0.6);
+  }
+  g.node.playgrad-watched.playgrad-highlight {
+    filter:
+      drop-shadow(0 0 6px rgb(245 158 11))
+      drop-shadow(0 0 4px rgb(96 165 250));
+  }
 </style>
 """
 
@@ -61,6 +87,8 @@ _ARCHITECTURE_CLICK_CSS: str = """
 _ARCHITECTURE_CLICK_JS: str = """
 <script>
 (function() {
+  const watchedSlugs = new Set();
+
   function slugFromMermaidId(id) {
     const m = /-flowchart-(.+)-\\d+$/.exec(id || '');
     return m ? m[1] : null;
@@ -70,13 +98,18 @@ _ARCHITECTURE_CLICK_JS: str = """
       'g.node[id*="-flowchart-' + slug.replace(/"/g, '') + '-"]'
     );
   }
+  function findCard(slug) {
+    return document.querySelector(
+      '[data-layer="' + slug.replace(/"/g, '') + '"]'
+    );
+  }
   function matchPair(el) {
     if (!el || !el.closest) return null;
     const node = el.closest('g.node');
     if (node) {
       const slug = slugFromMermaidId(node.id);
       if (!slug) return null;
-      const card = document.querySelector('[data-layer="' + slug + '"]');
+      const card = findCard(slug);
       if (!card) return null;
       return { node: node, card: card };
     }
@@ -133,11 +166,13 @@ _ARCHITECTURE_CLICK_JS: str = """
 
   document.addEventListener('click', function(e) {
     if (!e.target.closest) return;
+    // The eye toggle inside a card handles its own click; don't navigate.
+    if (e.target.closest('[data-watch-toggle]')) return;
     const node = e.target.closest('g.node');
     if (node) {
       const slug = slugFromMermaidId(node.id);
       if (!slug) return;
-      const card = document.querySelector('[data-layer="' + slug + '"]');
+      const card = findCard(slug);
       if (!card) return;
       scrollTargetToTop(card);
       return;
@@ -153,6 +188,38 @@ _ARCHITECTURE_CLICK_JS: str = """
     if (!mNode) return;
     scrollTargetToTop(mNode);
   });
+
+  // Toggle the `playgrad-watched` class on both the card and the matching
+  // mermaid node. Mermaid renders the SVG asynchronously, so the node may
+  // not exist yet when this runs; the MutationObserver below catches it.
+  window.playgradSetWatched = function(slug, on) {
+    if (on) { watchedSlugs.add(slug); } else { watchedSlugs.delete(slug); }
+    const card = findCard(slug);
+    if (card) card.classList.toggle('playgrad-watched', on);
+    const node = findMermaidNode(slug);
+    if (node) node.classList.toggle('playgrad-watched', on);
+  };
+  window.playgradScrollCardToTop = function(slug) {
+    const card = findCard(slug);
+    if (card) scrollTargetToTop(card);
+  };
+
+  // Re-apply watched classes to any matching mermaid node / card that
+  // appears after the initial render. Skips work when nothing is watched.
+  const observer = new MutationObserver(function() {
+    if (watchedSlugs.size === 0) return;
+    for (const slug of watchedSlugs) {
+      const card = findCard(slug);
+      if (card && !card.classList.contains('playgrad-watched')) {
+        card.classList.add('playgrad-watched');
+      }
+      const node = findMermaidNode(slug);
+      if (node && !node.classList.contains('playgrad-watched')) {
+        node.classList.add('playgrad-watched');
+      }
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
 })();
 </script>
 """
@@ -181,6 +248,7 @@ def serve(
     mermaid_src = build_mermaid(session.model)
     layer_names = session.layer_names
     input_name = session.input_names[0] if session.input_names else None
+    watch_state = _WatchState()
 
     fastapi_app = FastAPI()
     favicon_path = Path(__file__).resolve().parents[2] / "assets" / "logo_small.png"
@@ -191,10 +259,15 @@ def serve(
             session,
             mermaid_src,
             layer_names,
+            watch_state=watch_state,
             input_name=input_name,
             input_mean=input_mean,
             input_std=input_std,
         )
+
+    @ui.page("/watch", favicon=str(favicon_path))
+    def watch_page() -> None:
+        _build_watch_page(watch_state, layer_names)
 
     ui.run_with(fastapi_app, storage_secret="playgrad")
 
@@ -213,6 +286,26 @@ def serve(
 
 
 @dataclass
+class _WatchState:
+    """Shared set of watched layer names.
+
+    One instance per `serve()` call, captured by both the `/` and `/watch`
+    page handlers via closure so the selection survives navigation between
+    pages. UI-only for now — the backend accumulators that will eventually
+    feed the watch view aren't implemented here.
+    """
+
+    layers: set[str] = field(default_factory=set)
+
+    def toggle(self, name: str) -> bool:
+        if name in self.layers:
+            self.layers.remove(name)
+            return False
+        self.layers.add(name)
+        return True
+
+
+@dataclass
 class _PageState:
     sample_idx: int = 0
     last_snapshot: BatchSnapshot | None = None
@@ -226,6 +319,7 @@ def _build_page(
     mermaid_src: str,
     layer_names: list[str],
     *,
+    watch_state: _WatchState,
     input_name: str | None,
     input_mean: tuple[float, ...] | None,
     input_std: tuple[float, ...] | None,
@@ -271,9 +365,24 @@ def _build_page(
             position_label = ui.label("(waiting for first snapshot)").classes("ml-3 font-mono text-sm")
             ui.label("Viewing sample:").classes("ml-3 text-sm")
             sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
+            watch_chip = ui.button(
+                str(len(watch_state.layers)), icon="visibility", color="amber-600"
+            ).classes("ml-auto").props("dense size=md outline").tooltip(
+                "Watched layers — click to open the watch view or jump to a card"
+            )
+            watch_list_container: ui.column
+            with watch_chip:
+                with ui.menu().props("anchor='bottom right' self='top right'"):
+                    with ui.column().classes("min-w-64 p-0 gap-0"):
+                        ui.menu_item(
+                            "Open watch view  →",
+                            on_click=lambda: ui.navigate.to("/watch"),
+                        ).classes("font-medium")
+                        ui.separator()
+                        watch_list_container = ui.column().classes("gap-0 py-1")
             input_toggle = ui.button(
                 icon="image", color="slate-500"
-            ).classes("ml-auto").props("dense size=md").tooltip(
+            ).props("dense size=md").tooltip(
                 "Toggle input image pane"
             )
 
@@ -297,6 +406,34 @@ def _build_page(
 
             sample_input.on_value_change(on_sample_change)
 
+        def refresh_chip() -> None:
+            watch_chip.text = str(len(watch_state.layers))
+            watch_list_container.clear()
+            with watch_list_container:
+                if not watch_state.layers:
+                    ui.label("No layers watched").classes(
+                        "px-3 py-2 text-slate-500 text-sm italic"
+                    )
+                    return
+                for layer in layer_names:
+                    if layer not in watch_state.layers:
+                        continue
+                    ui.menu_item(
+                        layer,
+                        on_click=lambda n=layer: ui.run_javascript(
+                            f"window.playgradScrollCardToTop({json.dumps(slug(n))})"
+                        ),
+                    ).classes("font-mono text-sm")
+
+        def toggle_layer(name: str) -> None:
+            on = watch_state.toggle(name)
+            ui.run_javascript(
+                f"window.playgradSetWatched({json.dumps(slug(name))}, "
+                f"{'true' if on else 'false'})"
+            )
+            refresh_chip()
+            layer_views[name].refresh_eye()
+
         with ui.row().classes("w-full no-wrap gap-0 grow min-h-0"):
             architecture_pane = ui.column().classes(
                 "w-1/4 shrink-0 h-full overflow-auto p-2 "
@@ -308,7 +445,11 @@ def _build_page(
                 "grow min-w-0 h-full overflow-auto p-3 bg-slate-200 gap-3"
             ):
                 for name in layer_names:
-                    layer_views[name] = _LayerView(name)
+                    layer_views[name] = _LayerView(
+                        name,
+                        watch_state=watch_state,
+                        on_toggle_watch=toggle_layer,
+                    )
             input_pane = ui.column().classes(
                 "w-72 shrink-0 h-full overflow-auto p-3 "
                 "border-l-2 border-slate-300 bg-slate-50 items-center"
@@ -325,6 +466,20 @@ def _build_page(
 
         architecture_toggle.on_click(toggle_architecture)
         input_toggle.on_click(toggle_input)
+
+    # Populate the chip menu and, if anything is already watched, push the
+    # set into JS so the MutationObserver applies the amber treatment to
+    # mermaid nodes once Mermaid finishes rendering them client-side.
+    refresh_chip()
+    if watch_state.layers:
+        slugs_js = json.dumps([slug(n) for n in watch_state.layers])
+        ui.timer(
+            0.0,
+            lambda: ui.run_javascript(
+                f"({slugs_js}).forEach(s => window.playgradSetWatched(s, true))"
+            ),
+            once=True,
+        )
 
     async def tick() -> None:
         snap = session.snapshot
@@ -356,6 +511,60 @@ def _build_page(
             input_html.set_content(input_img)
 
     ui.timer(0.2, tick)
+
+
+def _build_watch_page(
+    watch_state: _WatchState, layer_names: list[str]
+) -> None:
+    """The deep-dive page for watched layers.
+
+    Placeholder for now — it shows one card per watched layer with a
+    "stats coming soon" stub. The backend accumulators that will fill
+    these cards (histograms, scalar timelines, later min/max patches
+    and deep-dream visualisations) aren't built yet.
+    """
+    ui.page_title("PlayGrad — Watching")
+    ui.query(".nicegui-content").classes("p-0 h-screen overflow-hidden")
+    ui.query("body").classes("overflow-hidden")
+    ui.query("html").classes("overflow-hidden")
+
+    with ui.column().classes("w-full h-screen no-wrap gap-0"):
+        with ui.row().classes(
+            "w-full items-center gap-x-3 gap-y-0 px-3 py-2 shrink-0 "
+            "border-b-2 border-slate-300 bg-slate-100 shadow-sm z-10"
+        ):
+            ui.button(
+                icon="arrow_back",
+                on_click=lambda: ui.navigate.to("/"),
+                color="slate-500",
+            ).props("dense size=md").tooltip("Back to the main page")
+            ui.label("Watching").classes("font-mono text-base font-bold ml-2")
+            ui.label(
+                f"{len(watch_state.layers)} layer"
+                f"{'' if len(watch_state.layers) == 1 else 's'}"
+            ).classes("text-sm text-slate-500 ml-2")
+
+        with ui.column().classes(
+            "w-full grow min-h-0 overflow-auto p-4 gap-3 bg-slate-200"
+        ):
+            if not watch_state.layers:
+                with ui.column().classes("items-center gap-2 py-12 w-full"):
+                    ui.icon("visibility_off", size="lg").classes("text-slate-400")
+                    ui.label("No layers selected.").classes("text-slate-600")
+                    ui.label(
+                        "Go back and click the eye icon on a layer card "
+                        "to start watching."
+                    ).classes("text-slate-500 text-sm")
+                return
+            for name in layer_names:
+                if name not in watch_state.layers:
+                    continue
+                with ui.card().classes("w-full p-4 gap-2"):
+                    ui.label(name).classes("font-mono text-base font-bold")
+                    ui.label(
+                        "Stats coming soon — backend accumulators are "
+                        "not implemented yet."
+                    ).classes("text-slate-500 italic text-sm")
 
 
 def _build_step_until_custom_dialog(session: Session) -> ui.dialog:
@@ -505,22 +714,56 @@ class _LayerView:
     `min-w-0` so a wide strip doesn't push the column wider.
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        watch_state: _WatchState,
+        on_toggle_watch: Callable[[str], None],
+    ) -> None:
         self.name = name
+        self._watch_state = watch_state
         card = ui.element("div").classes(
             "w-full min-w-0 bg-white rounded border border-slate-300 shadow-sm "
             "hover:border-blue-400 transition-colors"
         )
         card.props(f'data-layer="{slug(name)}"')
         with card:
-            ui.label(name).classes(
-                "block px-3 py-1 font-mono text-sm bg-slate-100 "
+            with ui.row().classes(
+                "items-center w-full no-wrap gap-2 px-3 py-1 bg-slate-100 "
                 "border-b border-slate-300 rounded-t"
-            )
+            ):
+                ui.label(name).classes(
+                    "font-mono text-sm grow min-w-0 truncate"
+                )
+                # The wrapper carries `data-watch-toggle` so the
+                # document-level click handler skips card→diagram
+                # navigation when the eye button is clicked. Quasar's q-btn
+                # doesn't reliably pass arbitrary `data-*` attrs through to
+                # its rendered DOM, so the attribute lives on this div.
+                with ui.element("div").props("data-watch-toggle"):
+                    self._eye_btn = ui.button(
+                        icon="visibility_off",
+                        on_click=lambda: on_toggle_watch(name),
+                    ).props("dense flat round size=sm").classes(
+                        "text-slate-500"
+                    ).tooltip("Watch this layer (toggle)")
             with ui.element("div").classes("w-full overflow-x-auto p-2"):
                 self.act_html = ui.html("")
                 ui.element("div").classes("h-1")
                 self.grad_html = ui.html("")
+        # Sync the icon now in case the page is being rebuilt with a layer
+        # that's already in the watched set (e.g. after navigating from
+        # `/watch` back to `/`).
+        self.refresh_eye()
+
+    def refresh_eye(self) -> None:
+        on = self.name in self._watch_state.layers
+        self._eye_btn.icon = "visibility" if on else "visibility_off"
+        if on:
+            self._eye_btn.classes(add="text-amber-600", remove="text-slate-500")
+        else:
+            self._eye_btn.classes(add="text-slate-500", remove="text-amber-600")
 
     def compute(
         self, activation: Tensor | None, gradient: Tensor | None, sample_idx: int

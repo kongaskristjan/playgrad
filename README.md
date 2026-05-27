@@ -103,6 +103,15 @@ strips for the selected sample; the right pane shows the input image for
 that sample (RGB or grayscale), denormalized with the `input_mean` /
 `input_std` passed to `serve()` if any.
 
+Each layer card has an eye-icon toggle in its header that marks the
+layer as "watched". Watched cards (and the matching architecture
+node) get a stronger amber outline that persists across hover. The
+top bar carries a small watch chip showing how many layers are
+currently selected; clicking it opens a menu with a link to the
+deep-dive `/watch` page and shortcuts that scroll the centre pane to
+each watched card. The watch page itself is a placeholder while the
+backend accumulators that will feed it are being built.
+
 See `INTERNALS.md` for the architecture overview.
 
 ## Tests
