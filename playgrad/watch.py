@@ -1,0 +1,337 @@
+"""Running stats for watched layers — activations and activation gradients.
+
+For each watched layer, we accumulate per `(phase, epoch)`:
+
+- scalar reductions: count, sum, sum_of_squares, min, max
+- a signed-log histogram with 211 bins covering `(-1e6, 1e6)`
+
+The histogram has 7 bins per decade in log10 space on each sign:
+
+    bins  0 .. 104 : negative bins, from `-1e6` down to `-1e-9`
+    bin   105      : the "zero band" covering `(-1e-9, +1e-9)`
+    bins  106 .. 210 : positive bins, from `+1e-9` up to `+1e6`
+
+Bin edges land on powers of 10 and at six intermediate log-spaced points
+between consecutive powers, so axis labels at the powers of 10 line up
+with bin boundaries instead of bisecting bins. The two end bins are
+open-ended: anything below `-1e6` or above `+1e6` saturates into them,
+and the UI marks these as overflow.
+
+All running stats live on the device of the first tensor seen for that
+accumulator (typically the model's training device). Inputs are cast to
+fp32 before reduction so bf16/fp16 training doesn't lose precision in
+the running sums or bin-assignment math. A `snapshot()` method copies
+the running state to CPU as immutable `*Snapshot` dataclasses suitable
+for the UI to consume.
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import Literal
+
+import torch
+from torch import Tensor
+
+BINS_PER_DECADE: int = 7
+LOG10_MIN: int = -9
+LOG10_MAX: int = 6
+DECADES: int = LOG10_MAX - LOG10_MIN  # 15
+N_POS: int = BINS_PER_DECADE * DECADES  # 105
+N_BINS: int = 2 * N_POS + 1  # 211
+ZERO_BIN: int = N_POS  # 105
+_SMALLEST_POSITIVE: float = 10.0**LOG10_MIN  # 1e-9
+
+
+Kind = Literal["activation", "gradient"]
+
+
+def histogram_edges() -> list[float]:
+    """The 212 edges of the 211-bin signed-log histogram, ordered low to high.
+
+    The first edge is `-1e6`, the last is `+1e6`. Edges 105 and 106 are
+    `-1e-9` and `+1e-9` — they bracket the zero band (bin index 105).
+    """
+    pos_edges = [
+        10.0 ** (LOG10_MIN + i / BINS_PER_DECADE) for i in range(N_POS + 1)
+    ]
+    neg_edges = [-e for e in reversed(pos_edges)]
+    return neg_edges + pos_edges
+
+
+def bin_index(value: float) -> int:
+    """Return the bin index for a single Python float. Used by tests."""
+    if not math.isfinite(value):
+        if math.isnan(value):
+            return ZERO_BIN
+        return N_BINS - 1 if value > 0 else 0
+    abs_v = abs(value)
+    if abs_v < _SMALLEST_POSITIVE:
+        return ZERO_BIN
+    log_idx = (math.log10(abs_v) - LOG10_MIN) * BINS_PER_DECADE
+    pos = max(0, min(N_POS - 1, int(log_idx)))
+    return ZERO_BIN + 1 + pos if value > 0 else ZERO_BIN - 1 - pos
+
+
+def _bin_indices(x: Tensor) -> Tensor:
+    """Vectorised version of `bin_index` for a flat fp32 tensor."""
+    abs_x = x.abs()
+    in_zero = abs_x < _SMALLEST_POSITIVE
+    # `clamp_min` keeps log10 finite for zero/subnormal inputs; those are
+    # picked up by `in_zero` and re-mapped to the zero bin below.
+    log_abs = torch.log10(abs_x.clamp_min(_SMALLEST_POSITIVE))
+    pos = ((log_abs - LOG10_MIN) * BINS_PER_DECADE).long().clamp_(0, N_POS - 1)
+    pos_idx = ZERO_BIN + 1 + pos
+    neg_idx = ZERO_BIN - 1 - pos
+    idx = torch.where(x >= 0, pos_idx, neg_idx)
+    zero = torch.full_like(idx, ZERO_BIN)
+    return torch.where(in_zero, zero, idx)
+
+
+@dataclass(frozen=True)
+class TensorStatsSnapshot:
+    """Immutable CPU-side view of a single (layer, phase, epoch, kind) accumulator."""
+
+    n: int
+    sum: float
+    sum_sq: float
+    min: float
+    max: float
+    hist: tuple[int, ...]
+
+    @property
+    def mean(self) -> float:
+        return self.sum / self.n if self.n > 0 else float("nan")
+
+    @property
+    def variance(self) -> float:
+        if self.n < 2:
+            return float("nan")
+        mean = self.mean
+        v = self.sum_sq / self.n - mean * mean
+        return max(v, 0.0)
+
+    @property
+    def std(self) -> float:
+        v = self.variance
+        return math.sqrt(v) if math.isfinite(v) and v > 0 else 0.0
+
+    @property
+    def median(self) -> float:
+        """Histogram-derived median: midpoint of the bin that holds the median."""
+        if self.n == 0:
+            return float("nan")
+        half = self.n / 2
+        running = 0
+        for i, count in enumerate(self.hist):
+            running += count
+            if running >= half:
+                return bin_midpoint(i)
+        return bin_midpoint(N_BINS - 1)
+
+
+@dataclass(frozen=True)
+class LayerStatsSnapshot:
+    layer: str
+    phase: str
+    epoch: int
+    activations: TensorStatsSnapshot
+    gradients: TensorStatsSnapshot
+
+
+@dataclass(frozen=True)
+class WatchSnapshot:
+    """Immutable view of all accumulated stats at a point in time.
+
+    Keyed by `(layer, phase, epoch)`. The UI is expected to filter to the
+    layers it wants to display (typically the latest epoch for each phase).
+    """
+
+    stats: dict[tuple[str, str, int], LayerStatsSnapshot] = field(
+        default_factory=dict
+    )
+
+    def latest_per_phase(self, layer: str) -> dict[str, LayerStatsSnapshot]:
+        """For `layer`, return `phase -> stats` for the most recent epoch seen.
+
+        Returns an empty dict if the layer has no entries yet.
+        """
+        result: dict[str, LayerStatsSnapshot] = {}
+        for (l, ph, ep), s in self.stats.items():
+            if l != layer:
+                continue
+            existing = result.get(ph)
+            if existing is None or ep > existing.epoch:
+                result[ph] = s
+        return result
+
+
+def bin_midpoint(idx: int) -> float:
+    """Linear-space value at the geometric midpoint of the given bin.
+
+    The two extreme bins are open-ended; we report their closed edge as a
+    representative value (it's the only finite point we have).
+    """
+    if idx == ZERO_BIN:
+        return 0.0
+    if idx == 0:
+        return -(10.0**LOG10_MAX)
+    if idx == N_BINS - 1:
+        return 10.0**LOG10_MAX
+    if idx > ZERO_BIN:
+        k = idx - ZERO_BIN - 1
+        sign = 1.0
+    else:
+        k = ZERO_BIN - 1 - idx
+        sign = -1.0
+    lo = LOG10_MIN + k / BINS_PER_DECADE
+    hi = LOG10_MIN + (k + 1) / BINS_PER_DECADE
+    return sign * 10.0 ** ((lo + hi) / 2)
+
+
+class TensorAccumulator:
+    """Running stats for one tensor stream (activation OR gradient of a layer).
+
+    All state lives on the device of the first non-empty tensor passed to
+    `update()`. Reductions are computed in fp32; sums use fp32 (consumer GPUs
+    don't always have fast fp64). For training runs measured in millions of
+    elements this is comfortably precise — if you push much further you'd
+    want Welford here.
+    """
+
+    def __init__(self) -> None:
+        self._device: torch.device | None = None
+        self._n: Tensor | None = None
+        self._sum: Tensor | None = None
+        self._sum_sq: Tensor | None = None
+        self._min: Tensor | None = None
+        self._max: Tensor | None = None
+        self._hist: Tensor | None = None
+
+    def _lazy_init(self, device: torch.device) -> None:
+        if self._device is not None:
+            return
+        self._device = device
+        self._n = torch.zeros((), dtype=torch.int64, device=device)
+        self._sum = torch.zeros((), dtype=torch.float32, device=device)
+        self._sum_sq = torch.zeros((), dtype=torch.float32, device=device)
+        self._min = torch.full((), float("inf"), dtype=torch.float32, device=device)
+        self._max = torch.full(
+            (), float("-inf"), dtype=torch.float32, device=device
+        )
+        self._hist = torch.zeros(N_BINS, dtype=torch.int64, device=device)
+
+    def update(self, x: Tensor) -> None:
+        if x.numel() == 0:
+            return
+        self._lazy_init(x.device)
+        assert self._sum is not None
+        assert self._sum_sq is not None
+        assert self._min is not None
+        assert self._max is not None
+        assert self._hist is not None
+        assert self._n is not None
+        flat = x.detach().to(torch.float32).reshape(-1)
+        self._n += flat.numel()
+        self._sum += flat.sum()
+        self._sum_sq += flat.square().sum()
+        self._min = torch.minimum(self._min, flat.min())
+        self._max = torch.maximum(self._max, flat.max())
+        self._hist += torch.bincount(_bin_indices(flat), minlength=N_BINS)
+
+    def snapshot(self) -> TensorStatsSnapshot:
+        if self._device is None:
+            return TensorStatsSnapshot(
+                n=0,
+                sum=0.0,
+                sum_sq=0.0,
+                min=float("inf"),
+                max=float("-inf"),
+                hist=tuple([0] * N_BINS),
+            )
+        assert self._n is not None
+        assert self._sum is not None
+        assert self._sum_sq is not None
+        assert self._min is not None
+        assert self._max is not None
+        assert self._hist is not None
+        # One sync per scalar group; the histogram lands separately because
+        # it's int64 and the scalars are float32.
+        scalars = torch.stack([self._sum, self._sum_sq, self._min, self._max]).cpu()
+        n = int(self._n.cpu().item())
+        hist_cpu = self._hist.cpu()
+        return TensorStatsSnapshot(
+            n=n,
+            sum=float(scalars[0].item()),
+            sum_sq=float(scalars[1].item()),
+            min=float(scalars[2].item()),
+            max=float(scalars[3].item()),
+            hist=tuple(int(c) for c in hist_cpu.tolist()),
+        )
+
+
+@dataclass
+class _LayerStats:
+    activations: TensorAccumulator = field(default_factory=TensorAccumulator)
+    gradients: TensorAccumulator = field(default_factory=TensorAccumulator)
+
+
+class WatchAccumulator:
+    """Thread-safe per-(layer, phase, epoch) accumulator store.
+
+    Training-thread writes (`update`) and UI-thread reads (`snapshot`) are
+    serialised by a single lock. Hold time is dominated by the GPU→CPU sync
+    that `snapshot()` does once per UI refresh; per-batch `update()` only
+    mutates GPU-side tensors so it's nearly lock-free in practice.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stats: dict[tuple[str, str, int], _LayerStats] = {}
+
+    def update(
+        self,
+        *,
+        layer: str,
+        phase: str,
+        epoch: int,
+        kind: Kind,
+        x: Tensor,
+    ) -> None:
+        key = (layer, phase, epoch)
+        with self._lock:
+            stats = self._stats.get(key)
+            if stats is None:
+                stats = _LayerStats()
+                self._stats[key] = stats
+            acc = stats.activations if kind == "activation" else stats.gradients
+        acc.update(x)
+
+    def forget_layer(self, layer: str) -> None:
+        """Drop all stored stats for `layer` (e.g. on unwatch)."""
+        with self._lock:
+            for key in list(self._stats):
+                if key[0] == layer:
+                    del self._stats[key]
+
+    def snapshot(self, *, layers: Iterable[str] | None = None) -> WatchSnapshot:
+        """Snapshot all (or the requested subset of) layers' stats."""
+        wanted = set(layers) if layers is not None else None
+        with self._lock:
+            keys = [k for k in self._stats if wanted is None or k[0] in wanted]
+            stats_refs = [(k, self._stats[k]) for k in keys]
+        # Compute snapshots outside the lock — `TensorAccumulator.snapshot`
+        # does GPU→CPU syncs that we don't want serialised with updates.
+        out: dict[tuple[str, str, int], LayerStatsSnapshot] = {}
+        for (layer, phase, epoch), stats in stats_refs:
+            out[(layer, phase, epoch)] = LayerStatsSnapshot(
+                layer=layer,
+                phase=phase,
+                epoch=epoch,
+                activations=stats.activations.snapshot(),
+                gradients=stats.gradients.snapshot(),
+            )
+        return WatchSnapshot(stats=out)

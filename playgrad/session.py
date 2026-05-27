@@ -38,6 +38,7 @@ from torch import Tensor, fx, nn
 from torch.utils.hooks import RemovableHandle
 
 from playgrad.schedule import BatchPosition, Schedule
+from playgrad.watch import WatchAccumulator, WatchSnapshot
 
 
 class Mode(StrEnum):
@@ -89,6 +90,8 @@ class Session:
         self._layer_names: list[str] = self._compute_layer_names()
         self._original_forward: object | None = None
         self._had_instance_forward: bool = False
+        self._watched_layers: set[str] = set()
+        self._watch_accumulator = WatchAccumulator()
 
     @property
     def schedule(self) -> Schedule:
@@ -133,6 +136,40 @@ class Session:
 
     def batch(self, *, phase: str, epoch: int) -> _BatchContext:
         return _BatchContext(self, phase=phase, epoch=epoch)
+
+    @property
+    def watched_layers(self) -> frozenset[str]:
+        """Immutable snapshot of the currently-watched layer names."""
+        with self._cv:
+            return frozenset(self._watched_layers)
+
+    def watch(self, layer: str) -> bool:
+        """Start collecting stats for `layer`. Returns False if not a module.
+
+        Layers that don't resolve to an `nn.Module` (e.g. graph inputs or fx
+        intermediate ops like `relu`/`add`) can't be watched because we
+        attach forward hooks to compute the stats. Non-module layer names
+        are silently ignored.
+        """
+        try:
+            self.model.get_submodule(layer)
+        except AttributeError:
+            return False
+        with self._cv:
+            self._watched_layers.add(layer)
+        return True
+
+    def unwatch(self, layer: str) -> None:
+        """Stop watching `layer` and drop any stats already collected for it."""
+        with self._cv:
+            self._watched_layers.discard(layer)
+        self._watch_accumulator.forget_layer(layer)
+
+    def watch_snapshot(self) -> WatchSnapshot:
+        """Snapshot of all currently-watched layers' stats."""
+        with self._cv:
+            layers = list(self._watched_layers)
+        return self._watch_accumulator.snapshot(layers=layers)
 
     def set_schedule(
         self,
@@ -225,12 +262,52 @@ class Session:
             handle = module.register_forward_hook(self._make_hook(name))
             self._hook_handles.append(handle)
 
+    def _install_stats_hooks(self, watched: set[str]) -> None:
+        """Install forward hooks on only the watched modules.
+
+        Unlike `_install_hooks`, this never patches `model.forward` even in
+        fx mode — we want the user's normal forward path on non-capture
+        batches. Per-module forward hooks fire during the regular forward
+        regardless of fx, so the watched modules' outputs (with `retain_grad`)
+        land in `self._activations` and are available after `loss.backward()`.
+        """
+        self._activations.clear()
+        for name in watched:
+            try:
+                module = self.model.get_submodule(name)
+            except AttributeError:
+                continue
+            handle = module.register_forward_hook(self._make_hook(name))
+            self._hook_handles.append(handle)
+
     def _remove_hooks(self) -> None:
-        if self._fx_graph is not None:
+        if self._original_forward is not None:
             self._unpatch_forward()
         for h in self._hook_handles:
             h.remove()
         self._hook_handles.clear()
+
+    def _update_watch_stats(self, pos: BatchPosition) -> None:
+        for name in self._watched_layers:
+            tensor = self._activations.get(name)
+            if tensor is None:
+                continue
+            self._watch_accumulator.update(
+                layer=name,
+                phase=pos.phase,
+                epoch=pos.epoch,
+                kind="activation",
+                x=tensor,
+            )
+            grad = tensor.grad
+            if grad is not None:
+                self._watch_accumulator.update(
+                    layer=name,
+                    phase=pos.phase,
+                    epoch=pos.epoch,
+                    kind="gradient",
+                    x=grad,
+                )
 
     def _patch_forward(self) -> None:
         # Stash whatever .forward currently resolves to so we can put it back,
@@ -343,14 +420,19 @@ class _BatchContext:
         self._epoch = epoch
         self._position: BatchPosition | None = None
         self._captured = False
+        self._stats_only = False
 
     def __enter__(self) -> Self:
         if self._session.closed:
             return self
         self._position = self._session._schedule.advance(self._phase, self._epoch)
         self._captured = self._session._should_capture(self._position)
+        watched = self._session._watched_layers
         if self._captured:
             self._session._install_hooks()
+        elif watched:
+            self._stats_only = True
+            self._session._install_stats_hooks(watched)
         return self
 
     def __exit__(
@@ -359,10 +441,12 @@ class _BatchContext:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self._position is None or not self._captured:
+        if self._position is None or not (self._captured or self._stats_only):
             return
+        if exc is None and self._session._watched_layers:
+            self._session._update_watch_stats(self._position)
         self._session._remove_hooks()
-        if exc is None and not self._session.closed:
+        if self._captured and exc is None and not self._session.closed:
             self._session._publish_snapshot(self._position)
             self._session._wait_for_proceed()
         self._session._activations.clear()

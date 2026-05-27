@@ -109,8 +109,20 @@ node) get a stronger amber outline that persists across hover. The
 top bar carries a small watch chip showing how many layers are
 currently selected; clicking it opens a menu with a link to the
 deep-dive `/watch` page and shortcuts that scroll the centre pane to
-each watched card. The watch page itself is a placeholder while the
-backend accumulators that will feed it are being built.
+each watched card.
+
+The `/watch` page renders one card per watched layer with two plotly
+histograms (activations + activation gradients) overlaid by phase
+(train / val) for the most recent epoch. Each histogram has 211
+signed-log bins covering `(-1e6, 1e6)` with bin edges on powers of 10
+and at six log-spaced points between them. Above each histogram a
+one-line summary shows `n`, `mean`, `std`, histogram-derived
+`median`, and `min`/`max`. The watch accumulators are populated on
+every batch, even in detach mode — only the watched modules pay the
+per-batch reduction cost. Watching a layer that doesn't resolve to an
+`nn.Module` (fx-traced intermediates like `relu`, or the input `x`)
+is a no-op; only modules can be watched because we attach forward
+hooks to compute the stats.
 
 See `INTERNALS.md` for the architecture overview.
 

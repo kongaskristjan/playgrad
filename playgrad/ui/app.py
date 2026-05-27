@@ -22,11 +22,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
+import plotly.graph_objects as go
 import uvicorn
 from fastapi import FastAPI
 from nicegui import ui
@@ -36,6 +38,16 @@ from playgrad.schedule import Schedule
 from playgrad.session import BatchSnapshot, Session
 from playgrad.ui.graph import build_mermaid, slug
 from playgrad.ui.render import render_image, render_strip
+from playgrad.watch import (
+    BINS_PER_DECADE,
+    LOG10_MAX,
+    LOG10_MIN,
+    N_BINS,
+    ZERO_BIN,
+    LayerStatsSnapshot,
+    TensorStatsSnapshot,
+    WatchSnapshot,
+)
 
 _ARCHITECTURE_CLICK_CSS: str = """
 <style>
@@ -248,7 +260,6 @@ def serve(
     mermaid_src = build_mermaid(session.model)
     layer_names = session.layer_names
     input_name = session.input_names[0] if session.input_names else None
-    watch_state = _WatchState()
 
     fastapi_app = FastAPI()
     favicon_path = Path(__file__).resolve().parents[2] / "assets" / "logo_small.png"
@@ -259,7 +270,6 @@ def serve(
             session,
             mermaid_src,
             layer_names,
-            watch_state=watch_state,
             input_name=input_name,
             input_mean=input_mean,
             input_std=input_std,
@@ -267,7 +277,7 @@ def serve(
 
     @ui.page("/watch", favicon=str(favicon_path))
     def watch_page() -> None:
-        _build_watch_page(watch_state, layer_names)
+        _build_watch_page(session, layer_names)
 
     ui.run_with(fastapi_app, storage_secret="playgrad")
 
@@ -286,26 +296,6 @@ def serve(
 
 
 @dataclass
-class _WatchState:
-    """Shared set of watched layer names.
-
-    One instance per `serve()` call, captured by both the `/` and `/watch`
-    page handlers via closure so the selection survives navigation between
-    pages. UI-only for now — the backend accumulators that will eventually
-    feed the watch view aren't implemented here.
-    """
-
-    layers: set[str] = field(default_factory=set)
-
-    def toggle(self, name: str) -> bool:
-        if name in self.layers:
-            self.layers.remove(name)
-            return False
-        self.layers.add(name)
-        return True
-
-
-@dataclass
 class _PageState:
     sample_idx: int = 0
     last_snapshot: BatchSnapshot | None = None
@@ -319,7 +309,6 @@ def _build_page(
     mermaid_src: str,
     layer_names: list[str],
     *,
-    watch_state: _WatchState,
     input_name: str | None,
     input_mean: tuple[float, ...] | None,
     input_std: tuple[float, ...] | None,
@@ -366,7 +355,9 @@ def _build_page(
             ui.label("Viewing sample:").classes("ml-3 text-sm")
             sample_input = ui.number(value=0, min=0, step=1, format="%d").classes("w-20").props("dense")
             watch_chip = ui.button(
-                str(len(watch_state.layers)), icon="visibility", color="amber-600"
+                str(len(session.watched_layers)),
+                icon="visibility",
+                color="amber-600",
             ).classes("ml-auto").props("dense size=md outline").tooltip(
                 "Watched layers — click to open the watch view or jump to a card"
             )
@@ -407,16 +398,17 @@ def _build_page(
             sample_input.on_value_change(on_sample_change)
 
         def refresh_chip() -> None:
-            watch_chip.text = str(len(watch_state.layers))
+            watched = session.watched_layers
+            watch_chip.text = str(len(watched))
             watch_list_container.clear()
             with watch_list_container:
-                if not watch_state.layers:
+                if not watched:
                     ui.label("No layers watched").classes(
                         "px-3 py-2 text-slate-500 text-sm italic"
                     )
                     return
                 for layer in layer_names:
-                    if layer not in watch_state.layers:
+                    if layer not in watched:
                         continue
                     ui.menu_item(
                         layer,
@@ -426,10 +418,19 @@ def _build_page(
                     ).classes("font-mono text-sm")
 
         def toggle_layer(name: str) -> None:
-            on = watch_state.toggle(name)
+            was_watched = name in session.watched_layers
+            if was_watched:
+                session.unwatch(name)
+                now_watched = False
+            else:
+                # `session.watch` returns False for non-modules (fx
+                # intermediates, graph inputs). Treat that as a no-op.
+                now_watched = session.watch(name)
+            if was_watched == now_watched:
+                return
             ui.run_javascript(
                 f"window.playgradSetWatched({json.dumps(slug(name))}, "
-                f"{'true' if on else 'false'})"
+                f"{'true' if now_watched else 'false'})"
             )
             refresh_chip()
             layer_views[name].refresh_eye()
@@ -447,7 +448,7 @@ def _build_page(
                 for name in layer_names:
                     layer_views[name] = _LayerView(
                         name,
-                        watch_state=watch_state,
+                        session=session,
                         on_toggle_watch=toggle_layer,
                     )
             input_pane = ui.column().classes(
@@ -471,8 +472,9 @@ def _build_page(
     # set into JS so the MutationObserver applies the amber treatment to
     # mermaid nodes once Mermaid finishes rendering them client-side.
     refresh_chip()
-    if watch_state.layers:
-        slugs_js = json.dumps([slug(n) for n in watch_state.layers])
+    initial_watched = list(session.watched_layers)
+    if initial_watched:
+        slugs_js = json.dumps([slug(n) for n in initial_watched])
         ui.timer(
             0.0,
             lambda: ui.run_javascript(
@@ -513,20 +515,152 @@ def _build_page(
     ui.timer(0.2, tick)
 
 
-def _build_watch_page(
-    watch_state: _WatchState, layer_names: list[str]
-) -> None:
-    """The deep-dive page for watched layers.
+_PHASE_COLORS: dict[str, str] = {
+    "train": "#d97706",  # amber
+    "val": "#3b82f6",  # blue
+    "test": "#10b981",  # emerald — fallback if a user names their phases differently
+}
+_FALLBACK_COLORS: tuple[str, ...] = ("#a855f7", "#ef4444", "#14b8a6", "#6b7280")
 
-    Placeholder for now — it shows one card per watched layer with a
-    "stats coming soon" stub. The backend accumulators that will fill
-    these cards (histograms, scalar timelines, later min/max patches
-    and deep-dream visualisations) aren't built yet.
+
+def _phase_color(phase: str, idx: int) -> str:
+    return _PHASE_COLORS.get(phase, _FALLBACK_COLORS[idx % len(_FALLBACK_COLORS)])
+
+
+def _x_tick_layout() -> tuple[list[int], list[str]]:
+    """Tick positions (bin indices) and labels for the signed-log x-axis.
+
+    Labels are drawn only at powers of 10 (every 7th edge); the
+    intermediate edges shape the bars but are unlabeled to keep the axis
+    legible.
+    """
+    tick_vals: list[int] = [ZERO_BIN]
+    tick_text: list[str] = ["0"]
+    for k in range(LOG10_MIN, LOG10_MAX + 1):
+        offset = (k - LOG10_MIN) * BINS_PER_DECADE
+        label = "1" if k == 0 else f"1e{k}"
+        tick_vals.append(ZERO_BIN + 1 + offset)
+        tick_text.append(label)
+        tick_vals.append(ZERO_BIN - 1 - offset)
+        tick_text.append("-1" if k == 0 else f"-1e{k}")
+    return tick_vals, tick_text
+
+
+def _format_stat(value: float) -> str:
+    """Format a scalar stat for the card header."""
+    if math.isnan(value):
+        return "—"
+    if value == 0:
+        return "0"
+    abs_v = abs(value)
+    if abs_v >= 1000 or abs_v < 0.01:
+        return f"{value:.2e}"
+    return f"{value:.3g}"
+
+
+def _stats_summary(stats: TensorStatsSnapshot) -> str:
+    """Compact one-line summary of the scalar stats shown above each histogram."""
+    if stats.n == 0:
+        return "no data yet"
+    return (
+        f"n={stats.n:,}  "
+        f"mean={_format_stat(stats.mean)}  "
+        f"std={_format_stat(stats.std)}  "
+        f"median≈{_format_stat(stats.median)}  "
+        f"min={_format_stat(stats.min)}  "
+        f"max={_format_stat(stats.max)}"
+    )
+
+
+def _make_histogram_figure(
+    per_phase: dict[str, LayerStatsSnapshot],
+    kind: str,
+    title: str,
+) -> go.Figure:
+    """Plotly bar chart of the signed-log histogram, one trace per phase.
+
+    `kind` selects which of the two histograms on each `LayerStatsSnapshot`
+    to plot ("activation" or "gradient"). `per_phase` may be empty (initial
+    render before any data has been collected) — the figure is still
+    returned, just with no traces.
+    """
+    tick_vals, tick_text = _x_tick_layout()
+    x_indices = list(range(N_BINS))
+    fig = go.Figure()
+    has_data = False
+    for i, (phase, layer_snap) in enumerate(per_phase.items()):
+        stats = (
+            layer_snap.activations
+            if kind == "activation"
+            else layer_snap.gradients
+        )
+        if stats.n == 0:
+            continue
+        has_data = True
+        fig.add_trace(
+            go.Bar(
+                x=x_indices,
+                y=list(stats.hist),
+                name=f"{phase} (ep {layer_snap.epoch})",
+                marker_color=_phase_color(phase, i),
+                opacity=0.55 if len(per_phase) > 1 else 0.85,
+                hovertemplate="bin %{x}<br>count %{y}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title=dict(text=title, x=0.0, font=dict(size=12)),
+        barmode="overlay",
+        bargap=0,
+        margin=dict(l=50, r=20, t=40, b=40),
+        height=220,
+        plot_bgcolor="#f8fafc",
+        paper_bgcolor="white",
+        showlegend=has_data,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=10),
+        ),
+    )
+    fig.update_xaxes(
+        tickvals=tick_vals,
+        ticktext=tick_text,
+        tickfont=dict(size=9),
+        showgrid=False,
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        type="log",
+        showgrid=True,
+        gridcolor="#e2e8f0",
+        tickfont=dict(size=9),
+        title=dict(text="count", font=dict(size=10)),
+    )
+    return fig
+
+
+def _build_watch_page(session: Session, layer_names: list[str]) -> None:
+    """The deep-dive page for watched layers — plotly histograms per layer.
+
+    Each card renders one bar chart per tensor kind (activations and
+    activation gradients) with train/val overlaid. A `ui.timer` polls
+    `session.watch_snapshot()` and refreshes the figures in place.
+
+    Layers can also be unwatched directly from the card header here, which
+    drops the corresponding accumulator entry — the change is reflected on
+    the main page on next navigation.
     """
     ui.page_title("PlayGrad — Watching")
     ui.query(".nicegui-content").classes("p-0 h-screen overflow-hidden")
     ui.query("body").classes("overflow-hidden")
     ui.query("html").classes("overflow-hidden")
+
+    layer_panels: dict[str, _WatchLayerPanel] = {}
+    count_label_holder: dict[str, ui.label] = {}
+    body_container: ui.column
 
     with ui.column().classes("w-full h-screen no-wrap gap-0"):
         with ui.row().classes(
@@ -539,15 +673,25 @@ def _build_watch_page(
                 color="slate-500",
             ).props("dense size=md").tooltip("Back to the main page")
             ui.label("Watching").classes("font-mono text-base font-bold ml-2")
-            ui.label(
-                f"{len(watch_state.layers)} layer"
-                f"{'' if len(watch_state.layers) == 1 else 's'}"
-            ).classes("text-sm text-slate-500 ml-2")
+            count_label_holder["count"] = ui.label("").classes(
+                "text-sm text-slate-500 ml-2"
+            )
+            ui.button(
+                icon="refresh",
+                on_click=lambda: refresh(),
+                color="slate-500",
+            ).classes("ml-auto").props("dense size=md flat").tooltip("Refresh now")
 
-        with ui.column().classes(
+        body_container = ui.column().classes(
             "w-full grow min-h-0 overflow-auto p-4 gap-3 bg-slate-200"
-        ):
-            if not watch_state.layers:
+        )
+
+    def rebuild_cards() -> None:
+        layer_panels.clear()
+        body_container.clear()
+        watched = session.watched_layers
+        with body_container:
+            if not watched:
                 with ui.column().classes("items-center gap-2 py-12 w-full"):
                     ui.icon("visibility_off", size="lg").classes("text-slate-400")
                     ui.label("No layers selected.").classes("text-slate-600")
@@ -557,14 +701,96 @@ def _build_watch_page(
                     ).classes("text-slate-500 text-sm")
                 return
             for name in layer_names:
-                if name not in watch_state.layers:
+                if name not in watched:
                     continue
-                with ui.card().classes("w-full p-4 gap-2"):
-                    ui.label(name).classes("font-mono text-base font-bold")
-                    ui.label(
-                        "Stats coming soon — backend accumulators are "
-                        "not implemented yet."
-                    ).classes("text-slate-500 italic text-sm")
+                layer_panels[name] = _WatchLayerPanel(
+                    name=name,
+                    session=session,
+                    on_unwatched=rebuild_cards,
+                )
+
+    def refresh() -> None:
+        watched = session.watched_layers
+        n = len(watched)
+        count_label_holder["count"].text = f"{n} layer{'' if n == 1 else 's'}"
+        if set(layer_panels) != set(watched):
+            rebuild_cards()
+        snap = session.watch_snapshot()
+        for panel in layer_panels.values():
+            panel.update(snap)
+
+    refresh()
+    ui.timer(2.0, refresh)
+
+
+class _WatchLayerPanel:
+    """One card per watched layer — activations + gradients histograms."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        session: Session,
+        on_unwatched: Callable[[], None],
+    ) -> None:
+        self.name = name
+        self._session = session
+        with ui.card().classes("w-full p-4 gap-2"):
+            with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                ui.label(name).classes("font-mono text-base font-bold grow")
+                ui.button(
+                    icon="visibility_off",
+                    color="amber-600",
+                    on_click=lambda: (session.unwatch(name), on_unwatched()),
+                ).props("dense size=sm flat round").tooltip("Stop watching")
+            with ui.column().classes("w-full gap-3"):
+                ui.label("Activations").classes(
+                    "font-mono text-sm text-slate-600"
+                )
+                self._act_stats = ui.label("no data yet").classes(
+                    "font-mono text-xs text-slate-500"
+                )
+                self._act_plot = ui.plotly(
+                    _make_histogram_figure({}, "activation", "activations")
+                ).classes("w-full")
+                ui.label("Gradients").classes(
+                    "font-mono text-sm text-slate-600"
+                )
+                self._grad_stats = ui.label("no data yet").classes(
+                    "font-mono text-xs text-slate-500"
+                )
+                self._grad_plot = ui.plotly(
+                    _make_histogram_figure({}, "gradient", "gradients")
+                ).classes("w-full")
+
+    def update(self, snap: WatchSnapshot) -> None:
+        per_phase = snap.latest_per_phase(self.name)
+        self._act_stats.text = _combined_summary(per_phase, "activation")
+        self._grad_stats.text = _combined_summary(per_phase, "gradient")
+        self._act_plot.figure = _make_histogram_figure(
+            per_phase, "activation", "activations"
+        )
+        self._act_plot.update()
+        self._grad_plot.figure = _make_histogram_figure(
+            per_phase, "gradient", "gradients"
+        )
+        self._grad_plot.update()
+
+
+def _combined_summary(
+    per_phase: dict[str, LayerStatsSnapshot], kind: str
+) -> str:
+    if not per_phase:
+        return "no data yet"
+    parts: list[str] = []
+    for phase, layer_snap in per_phase.items():
+        stats = (
+            layer_snap.activations
+            if kind == "activation"
+            else layer_snap.gradients
+        )
+        parts.append(f"[{phase} ep{layer_snap.epoch}] {_stats_summary(stats)}")
+    return "    ".join(parts)
 
 
 def _build_step_until_custom_dialog(session: Session) -> ui.dialog:
@@ -718,11 +944,11 @@ class _LayerView:
         self,
         name: str,
         *,
-        watch_state: _WatchState,
+        session: Session,
         on_toggle_watch: Callable[[str], None],
     ) -> None:
         self.name = name
-        self._watch_state = watch_state
+        self._session = session
         card = ui.element("div").classes(
             "w-full min-w-0 bg-white rounded border border-slate-300 shadow-sm "
             "hover:border-blue-400 transition-colors"
@@ -758,7 +984,7 @@ class _LayerView:
         self.refresh_eye()
 
     def refresh_eye(self) -> None:
-        on = self.name in self._watch_state.layers
+        on = self.name in self._session.watched_layers
         self._eye_btn.icon = "visibility" if on else "visibility_off"
         if on:
             self._eye_btn.classes(add="text-amber-600", remove="text-slate-500")

@@ -182,6 +182,74 @@ lazily on the UI thread when a layer card is opened; the eager copy in
 `_publish_snapshot` only moves raw tensor data, not anything pixel-shaped.
 A `(layer, pause_count)` cache in the UI keeps re-opens free.
 
+## Watch accumulators
+
+Independently of the snapshot path, the session can collect running
+statistics for any subset of named modules — driven by the eye-icon
+toggle on the main page, surfaced on the `/watch` deep-dive page.
+
+`Session.watch(name)` / `unwatch(name)` mutate the `_watched_layers`
+set under `_cv`. The `Session.watched_layers` snapshot is a
+`frozenset`, safe to read from the UI thread. `watch()` only accepts
+names that `model.get_submodule()` resolves — fx-graph intermediates
+(`relu`, `add`) and graph inputs (`x`) can't be watched because the
+stats path attaches per-module forward hooks.
+
+`_BatchContext` gains a stats-only path: if any layer is watched but
+the batch is *not* a capture batch (`detach`, mid-`step_run`, etc.),
+`_install_stats_hooks(watched)` installs forward hooks only on the
+watched modules. These hooks reuse `_make_hook`, so they populate
+`_activations` and call `retain_grad()` the same way the capture
+hooks do — the live tensor and its `.grad` are both available when
+`__exit__` runs. Crucially, this path **does not** patch
+`model.forward` even when fx tracing succeeded, so the user's normal
+forward runs untouched on non-capture batches.
+
+At `__exit__`, before snapshot publishing, `_update_watch_stats(pos)`
+walks `_watched_layers` and feeds each module's activation and
+gradient into `WatchAccumulator.update(layer, phase, epoch, kind, x)`.
+The accumulator is keyed by `(layer, phase, epoch)` so each
+epoch/phase gets its own bucket and history accumulates rather than
+overwriting. Unwatching a layer drops every key for it via
+`forget_layer(name)`.
+
+Inside `TensorAccumulator.update(x)`:
+
+1. `x.detach().to(torch.float32).reshape(-1)` — the fp32 cast is the
+   bf16/fp16-safety knob. bf16 sum-of-squares saturates after a few
+   hundred unit-magnitude samples; fp32 keeps the running sum precise
+   for typical epoch sizes.
+2. Reductions stay on the input's device: `sum()`, `square().sum()`,
+   `min()`, `max()`, plus a `torch.bincount(_bin_indices(x))` over the
+   211-bin signed-log histogram.
+3. All running state — `_n`, `_sum`, `_sum_sq`, `_min`, `_max`,
+   `_hist` — lives on that same device. No GPU→CPU sync happens
+   during training.
+
+Histogram bin assignment (`_bin_indices`) is a vectorised log10:
+
+- `|x| < 1e-9` → the zero band (bin 105).
+- Otherwise `floor((log10|x| - LOG10_MIN) * BINS_PER_DECADE)` gives the
+  per-sign offset, clamped to `[0, N_POS-1]` so values beyond `±1e6`
+  saturate into the two end bins (which the UI marks as overflow).
+- `torch.where(x >= 0, ZERO_BIN+1+pos, ZERO_BIN-1-pos)` packs both
+  signs into the 211-bin space with the zero band in the middle.
+
+`WatchAccumulator.snapshot(layers=...)` is the UI-thread reader. It
+holds the accumulator lock only briefly to copy the dict of stat
+references, then computes each `TensorStatsSnapshot` outside the lock
+— that's the one GPU→CPU sync per call, batched into one `torch.stack`
+for the scalars plus a single `.cpu()` for the histogram. The result
+is a frozen dataclass tree (`WatchSnapshot → LayerStatsSnapshot →
+TensorStatsSnapshot`) that the UI can render without holding any
+session state.
+
+The watch path adds zero overhead when nothing is watched and
+O(watched_modules) cost per batch when at least one layer is. In
+particular, the existing capture path is untouched on non-watching
+sessions, so the snapshot timeline and pause behaviour are
+unaffected.
+
 ## UI layer
 
 `playgrad.ui` is a thin NiceGUI app that reads `Session.snapshot` and
@@ -235,6 +303,16 @@ It does not touch tensors directly until they need to be rendered.
   modes no snapshots are produced so the UI is idle. For larger models
   this is the natural point to add viewport-aware lazy rendering, but
   the current code path keeps the wiring simple.
+- The `/watch` page is its own NiceGUI page handler keyed to the same
+  `Session`. It builds one `_WatchLayerPanel` per watched module, each
+  with two `ui.plotly` figures (activations and gradients) and a
+  one-line stats summary above each. A 2-second `ui.timer` calls
+  `session.watch_snapshot()` and updates the figures in place via
+  `plot.figure = new_fig; plot.update()`. The figures use signed-log
+  x-axis tick positions computed once by `_x_tick_layout` (powers of
+  10 labelled, intermediate edges unlabelled), `barmode="overlay"`
+  with per-phase opacity so train/val sit on the same axes, and a
+  log y-axis so distribution tails stay visible.
 
 ## Lifecycle summary
 

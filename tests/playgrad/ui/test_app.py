@@ -7,7 +7,7 @@ import torch
 
 from playgrad.schedule import BatchPosition, Schedule
 from playgrad.session import BatchSnapshot
-from playgrad.ui.app import _validate_step_until_target, _WatchState
+from playgrad.ui.app import _validate_step_until_target
 
 
 def _snapshot_at(phase: str, epoch: int, batch_idx: int) -> BatchSnapshot:
@@ -103,18 +103,3 @@ def test_validate_rejects_batch_out_of_range(schedule: Schedule) -> None:
     assert "Batch" in msg
 
 
-def test_watch_state_toggle_adds_then_removes() -> None:
-    state = _WatchState()
-    assert state.toggle("layer.0") is True
-    assert "layer.0" in state.layers
-    assert state.toggle("layer.0") is False
-    assert "layer.0" not in state.layers
-
-
-def test_watch_state_tracks_multiple_layers() -> None:
-    state = _WatchState()
-    state.toggle("a")
-    state.toggle("b")
-    assert state.layers == {"a", "b"}
-    state.toggle("a")
-    assert state.layers == {"b"}

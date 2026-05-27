@@ -501,3 +501,75 @@ def test_hooks_removed_after_each_batch() -> None:
     assert session._hook_handles == []  # type: ignore[reportPrivateUsage]
     session.detach()
     thread.join(timeout=5)
+
+
+def test_watch_rejects_non_module_names() -> None:
+    session, model = _make_session()
+    assert session.watch("fc1") is True
+    assert session.watch("bogus") is False
+    assert session.watched_layers == frozenset({"fc1"})
+
+
+def test_watch_accumulates_stats_while_detached() -> None:
+    """Stats accumulate on every batch even when detach() means no captures."""
+    session, model = _make_session(epochs=1, phases={"train": 3})
+    session.watch("fc1")
+    session.detach()
+
+    for _ in range(3):
+        with session.batch(phase="train", epoch=0) as ctx:
+            _train_step(model)
+            assert ctx.captured is False  # detach mode
+
+    snap = session.watch_snapshot()
+    assert ("fc1", "train", 0) in snap.stats
+    layer_stats = snap.stats[("fc1", "train", 0)]
+    # Three forward passes × 2 samples × 8 output features = 48 elements.
+    assert layer_stats.activations.n == 48
+    # Three backward passes' gradients aggregated too.
+    assert layer_stats.gradients.n == 48
+
+
+def test_watch_accumulates_stats_alongside_capture() -> None:
+    """Stats also accumulate when the batch is being captured for the snapshot."""
+    session, model = _make_session(epochs=1, phases={"train": 1})
+    session.watch("fc1")
+
+    def loop() -> None:
+        with session.batch(phase="train", epoch=0):
+            _train_step(model)
+
+    thread = _run_in_thread(loop)
+    assert session.wait_until_paused(timeout=5)
+    snap = session.watch_snapshot()
+    assert ("fc1", "train", 0) in snap.stats
+    assert snap.stats[("fc1", "train", 0)].activations.n == 16
+    session.detach()
+    thread.join(timeout=5)
+
+
+def test_unwatch_drops_collected_stats() -> None:
+    session, model = _make_session(epochs=1, phases={"train": 1})
+    session.watch("fc1")
+    session.detach()
+    with session.batch(phase="train", epoch=0):
+        _train_step(model)
+    assert ("fc1", "train", 0) in session.watch_snapshot().stats
+
+    session.unwatch("fc1")
+    assert session.watched_layers == frozenset()
+    assert session.watch_snapshot().stats == {}
+
+
+def test_watching_does_not_install_capture_hooks_under_detach() -> None:
+    """In detach mode with watching, only the watched module gets a hook."""
+    session, model = _make_session(epochs=1, phases={"train": 1})
+    session.watch("fc1")
+    session.detach()
+
+    with session.batch(phase="train", epoch=0):
+        # Inside the context, hooks are installed only for the watched module.
+        assert len(session._hook_handles) == 1  # type: ignore[reportPrivateUsage]
+        _train_step(model)
+    # All hooks removed at exit.
+    assert session._hook_handles == []  # type: ignore[reportPrivateUsage]
