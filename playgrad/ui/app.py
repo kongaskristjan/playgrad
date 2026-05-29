@@ -361,16 +361,21 @@ def _build_page(
             ).props("dense size=md no-caps").tooltip(
                 "Watched layers — click to open the watch view or jump to a card"
             )
-            watch_list_container: ui.column
+            watch_list_container: ui.element
             with watch_chip:
                 with ui.menu().props("anchor='bottom right' self='top right'"):
-                    with ui.column().classes("min-w-64 p-0 gap-0"):
+                    # Plain block container, NOT a flex column: Firefox fails to
+                    # position/size a QMenu whose content root is a flex column,
+                    # so the menu opens collapsed (height 0) and looks like it
+                    # never opened. See quasarframework/quasar#16167. Block-level
+                    # children stack vertically anyway.
+                    with ui.element("div").classes("min-w-64"):
                         ui.menu_item(
                             "Open watch view  →",
                             on_click=lambda: ui.navigate.to("/watch"),
                         ).classes("font-medium")
                         ui.separator()
-                        watch_list_container = ui.column().classes("gap-0 py-1")
+                        watch_list_container = ui.element("div").classes("py-1")
             input_toggle = ui.button(
                 icon="image", color="slate-500"
             ).props("dense size=md").tooltip(
