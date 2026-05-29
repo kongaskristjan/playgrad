@@ -12,6 +12,12 @@
   - `README.md` - How to run examples and the playgrad library API usage
   - `INTERNALS.md` - High level overview of playgrad library internals
 
+## Worktrees
+
+- When running in agents mode (work isolated in a git worktree), keep the worktree in sync with `main` to reduce conflicts:
+  - Start new work by branching a worktree from the current `main`.
+  - After finishing work, merge the worktree branch back into `main`.
+
 ## Code quality
 
 - Consider moving files to subdirectories if a large number of files appear in `lib/` or `tests/`
